@@ -6,20 +6,20 @@ export function drawTriangle({
   viewerScroll,
   pageStack,
   words,
-  wordIndex,
+  pointer,
+  triangleSize,
   themeRgb,
 }) {
   overlayContext.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
 
-  if (!words.length) {
+  if (!words.length || !pointer) {
     return;
   }
 
-  const word = words[wordIndex];
-  const centerX = (word.x0 + word.x1) / 2;
-  const top = word.y0;
-  const triangleHeight = Math.max(18, (word.y1 - word.y0) * 0.9);
-  const triangleWidth = Math.max(24, (word.x1 - word.x0) * 0.68);
+  const centerX = pointer.x;
+  const top = pointer.y0;
+  const triangleHeight = Math.max(18, triangleSize?.height ?? 20);
+  const triangleWidth = Math.max(24, triangleSize?.width ?? 26);
 
   const glowWidth = triangleWidth * 1.35;
   const glowHeight = triangleHeight * 1.25;
@@ -70,8 +70,8 @@ export function drawTriangle({
   ensureWordVisible({
     viewerScroll,
     pageStack,
-    y0: word.y0,
-    y1: word.y1,
+    y0: pointer.y0,
+    y1: pointer.y1,
   });
 }
 

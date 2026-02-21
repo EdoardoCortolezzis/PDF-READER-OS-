@@ -1,7 +1,6 @@
 import { AppearanceController } from "./js/appearance.js";
 import {
   APPEARANCE_DEFAULTS,
-  MAX_CATCH_UP_STEPS,
   READER_LIMITS,
   RERENDER_DEBOUNCE_MS,
 } from "./js/constants.js";
@@ -29,13 +28,26 @@ const state = {
   words: [],
   rowWordIndices: [],
   wordRowIndex: [],
+  readingOrder: [],
+  sequenceByWordIndex: [],
+  transitionWeights: [],
   running: true,
   pageLoading: false,
   wpm: READER_LIMITS.defaultWpm,
   minWpm: READER_LIMITS.minWpm,
   maxWpm: READER_LIMITS.maxWpm,
   msPerWord: Math.round(60_000 / READER_LIMITS.defaultWpm),
-  nextWordDue: performance.now() + Math.round(60_000 / READER_LIMITS.defaultWpm),
+  lastFrameTime: performance.now(),
+  motion: {
+    fromPosition: 0,
+    toPosition: 0,
+    elapsedMs: 0,
+    durationMs: 0,
+  },
+  triangleSize: {
+    width: 26,
+    height: 20,
+  },
 };
 
 let pageRenderToken = 0;
@@ -54,8 +66,278 @@ function setPageStackVisible(visible) {
   dom.pageStack.style.display = visible ? "block" : "none";
 }
 
-function resetWordTimer() {
-  state.nextWordDue = performance.now() + state.msPerWord;
+function lerp(from, to, t) {
+  return from + ((to - from) * t);
+}
+
+function wordCenter(word) {
+  return {
+    x: (word.x0 + word.x1) / 2,
+    y: (word.y0 + word.y1) / 2,
+  };
+}
+
+function buildReadingOrder(words, rowWordIndices) {
+  const order = rowWordIndices.flat();
+  if (order.length === words.length) {
+    return order;
+  }
+
+  const seen = new Set(order);
+  for (let index = 0; index < words.length; index += 1) {
+    if (!seen.has(index)) {
+      order.push(index);
+    }
+  }
+
+  return order;
+}
+
+function computeTriangleSize(words) {
+  if (!words.length) {
+    return {
+      width: 26,
+      height: 20,
+    };
+  }
+
+  const heights = words
+    .map((word) => Math.max(1, word.y1 - word.y0))
+    .sort((left, right) => left - right);
+
+  const medianHeight = heights[Math.floor(heights.length / 2)] ?? 20;
+  const triangleHeight = Math.max(18, medianHeight * 0.9);
+
+  return {
+    height: triangleHeight,
+    width: Math.max(24, triangleHeight * 1.35),
+  };
+}
+
+function computeTransitionWeights({
+  words,
+  rowWordIndices,
+  readingOrder,
+  sequenceByWordIndex,
+}) {
+  const weights = new Array(Math.max(0, readingOrder.length - 1)).fill(1);
+  if (!weights.length) {
+    return weights;
+  }
+
+  rowWordIndices.forEach((row) => {
+    if (row.length < 2) {
+      return;
+    }
+
+    const segments = [];
+    let totalDistance = 0;
+
+    for (let index = 0; index < row.length - 1; index += 1) {
+      const leftWordIndex = row[index];
+      const rightWordIndex = row[index + 1];
+
+      const leftPosition = sequenceByWordIndex[leftWordIndex];
+      const rightPosition = sequenceByWordIndex[rightWordIndex];
+      if (leftPosition === undefined || leftPosition < 0) {
+        continue;
+      }
+      if (rightPosition !== leftPosition + 1) {
+        continue;
+      }
+
+      const leftCenter = wordCenter(words[leftWordIndex]);
+      const rightCenter = wordCenter(words[rightWordIndex]);
+      const distance = Math.hypot(
+        rightCenter.x - leftCenter.x,
+        rightCenter.y - leftCenter.y
+      );
+
+      segments.push({
+        position: leftPosition,
+        distance,
+      });
+      totalDistance += distance;
+    }
+
+    if (!segments.length) {
+      return;
+    }
+
+    if (totalDistance <= 0.001) {
+      segments.forEach(({ position }) => {
+        weights[position] = 1;
+      });
+      return;
+    }
+
+    const normalization = segments.length;
+    segments.forEach(({ position, distance }) => {
+      weights[position] = normalization * (distance / totalDistance);
+    });
+  });
+
+  return weights;
+}
+
+function getWordIndexAtPosition(position) {
+  if (!state.readingOrder.length) {
+    return 0;
+  }
+
+  const safePosition = clamp(position, 0, state.readingOrder.length - 1);
+  return state.readingOrder[safePosition];
+}
+
+function getLogicalPosition() {
+  if (
+    state.motion.fromPosition === state.motion.toPosition
+    || state.motion.durationMs <= 0
+  ) {
+    return state.motion.fromPosition;
+  }
+
+  const progress = clamp(state.motion.elapsedMs / state.motion.durationMs, 0, 1);
+  return progress >= 0.5 ? state.motion.toPosition : state.motion.fromPosition;
+}
+
+function syncWordIndexFromMotion() {
+  state.wordIndex = getWordIndexAtPosition(getLogicalPosition());
+}
+
+function transitionDurationMs(position) {
+  const weight = state.transitionWeights[position] ?? 1;
+  return Math.max(1, weight * state.msPerWord);
+}
+
+function setMotionToPosition(position) {
+  const maxPosition = Math.max(0, state.readingOrder.length - 1);
+  const clamped = clamp(position, 0, maxPosition);
+
+  state.motion.fromPosition = clamped;
+  state.motion.toPosition = clamped;
+  state.motion.elapsedMs = 0;
+  state.motion.durationMs = 0;
+
+  syncWordIndexFromMotion();
+}
+
+function refreshActiveTransitionForCurrentSpeed() {
+  if (state.motion.fromPosition === state.motion.toPosition) {
+    return;
+  }
+
+  const previousDuration = state.motion.durationMs;
+  const progress = previousDuration > 0
+    ? clamp(state.motion.elapsedMs / previousDuration, 0, 1)
+    : 0;
+
+  const duration = transitionDurationMs(state.motion.fromPosition);
+  state.motion.durationMs = duration;
+  state.motion.elapsedMs = duration * progress;
+}
+
+function startNextTransition() {
+  if (state.motion.fromPosition >= state.readingOrder.length - 1) {
+    return false;
+  }
+
+  state.motion.toPosition = state.motion.fromPosition + 1;
+  state.motion.elapsedMs = 0;
+  state.motion.durationMs = transitionDurationMs(state.motion.fromPosition);
+  return true;
+}
+
+function completeTransition() {
+  state.motion.fromPosition = state.motion.toPosition;
+  state.motion.elapsedMs = 0;
+  state.motion.durationMs = 0;
+  syncWordIndexFromMotion();
+}
+
+function maybeAdvancePageAfterEnd() {
+  if (!state.pdfDoc || state.pageLoading || state.pageNumber >= state.pdfDoc.numPages) {
+    return false;
+  }
+
+  void changePage(1);
+  return true;
+}
+
+function advanceMotion(deltaMs) {
+  let remainingMs = deltaMs;
+  let moved = false;
+
+  while (
+    remainingMs > 0
+    && state.running
+    && state.words.length
+    && !state.pageLoading
+  ) {
+    if (state.motion.fromPosition === state.motion.toPosition) {
+      if (!startNextTransition()) {
+        if (!maybeAdvancePageAfterEnd()) {
+          state.running = false;
+          updatePlaybackButton();
+          updateStatusChip();
+        }
+        break;
+      }
+    }
+
+    const segmentRemainingMs = Math.max(
+      0,
+      state.motion.durationMs - state.motion.elapsedMs
+    );
+
+    if (segmentRemainingMs <= 0.001) {
+      completeTransition();
+      continue;
+    }
+
+    const consumedMs = Math.min(segmentRemainingMs, remainingMs);
+    state.motion.elapsedMs += consumedMs;
+    remainingMs -= consumedMs;
+    moved = true;
+
+    if (state.motion.elapsedMs >= state.motion.durationMs - 0.001) {
+      completeTransition();
+    } else {
+      syncWordIndexFromMotion();
+    }
+  }
+
+  return moved;
+}
+
+function getPointerState() {
+  if (!state.words.length || !state.readingOrder.length) {
+    return null;
+  }
+
+  const fromWordIndex = getWordIndexAtPosition(state.motion.fromPosition);
+  const toWordIndex = getWordIndexAtPosition(state.motion.toPosition);
+  const fromWord = state.words[fromWordIndex];
+  const toWord = state.words[toWordIndex] ?? fromWord;
+  if (!fromWord || !toWord) {
+    return null;
+  }
+
+  const progress = (
+    state.motion.fromPosition === state.motion.toPosition
+    || state.motion.durationMs <= 0
+  )
+    ? 0
+    : clamp(state.motion.elapsedMs / state.motion.durationMs, 0, 1);
+
+  const fromCenter = wordCenter(fromWord);
+  const toCenter = wordCenter(toWord);
+
+  return {
+    x: lerp(fromCenter.x, toCenter.x, progress),
+    y0: lerp(fromWord.y0, toWord.y0, progress),
+    y1: lerp(fromWord.y1, toWord.y1, progress),
+  };
 }
 
 function updatePlaybackButton() {
@@ -104,7 +386,8 @@ function setSpeed(nextWpm, syncSlider = true) {
     dom.speedSlider.value = String(rounded);
   }
 
-  resetWordTimer();
+  refreshActiveTransitionForCurrentSpeed();
+  state.lastFrameTime = performance.now();
   updateStatusChip();
 }
 
@@ -115,47 +398,73 @@ function redrawTriangle() {
     viewerScroll: dom.viewerScroll,
     pageStack: dom.pageStack,
     words: state.words,
-    wordIndex: state.wordIndex,
+    pointer: getPointerState(),
+    triangleSize: state.triangleSize,
     themeRgb: appearance.state.themeRgb,
   });
-  updateStatusChip();
 }
 
 function setWords(words) {
   state.words = words;
-  state.wordIndex = 0;
 
   const rowIndex = buildRowIndex(words);
   state.rowWordIndices = rowIndex.rowWordIndices;
   state.wordRowIndex = rowIndex.wordRowIndex;
+
+  state.readingOrder = buildReadingOrder(words, state.rowWordIndices);
+  state.sequenceByWordIndex = new Array(words.length).fill(-1);
+  state.readingOrder.forEach((wordIndex, position) => {
+    state.sequenceByWordIndex[wordIndex] = position;
+  });
+  state.transitionWeights = computeTransitionWeights({
+    words,
+    rowWordIndices: state.rowWordIndices,
+    readingOrder: state.readingOrder,
+    sequenceByWordIndex: state.sequenceByWordIndex,
+  });
+  state.triangleSize = computeTriangleSize(words);
+
+  if (state.readingOrder.length) {
+    setMotionToPosition(0);
+    return;
+  }
+
+  state.wordIndex = 0;
+  state.motion.fromPosition = 0;
+  state.motion.toPosition = 0;
+  state.motion.elapsedMs = 0;
+  state.motion.durationMs = 0;
 }
 
 function togglePlayback() {
   state.running = !state.running;
-  if (state.running) {
-    resetWordTimer();
-  }
-
+  state.lastFrameTime = performance.now();
   updatePlaybackButton();
   updateStatusChip();
 }
 
 function stepWord(delta) {
-  if (!state.words.length) {
+  if (!state.readingOrder.length) {
     return;
   }
 
-  state.wordIndex = clamp(state.wordIndex + delta, 0, state.words.length - 1);
+  const targetPosition = clamp(
+    getLogicalPosition() + delta,
+    0,
+    state.readingOrder.length - 1
+  );
+  setMotionToPosition(targetPosition);
+  state.lastFrameTime = performance.now();
   redrawTriangle();
-  resetWordTimer();
 }
 
 function moveRow(deltaRows) {
-  if (!state.words.length || !state.rowWordIndices.length) {
+  if (!state.words.length || !state.rowWordIndices.length || !state.readingOrder.length) {
     return;
   }
 
-  const currentRow = state.wordRowIndex[state.wordIndex];
+  const currentWordIndex = getWordIndexAtPosition(getLogicalPosition());
+  const currentRow = state.wordRowIndex[currentWordIndex];
   if (currentRow === undefined || currentRow < 0) {
     return;
   }
@@ -165,15 +474,21 @@ function moveRow(deltaRows) {
     return;
   }
 
-  state.wordIndex = selectClosestWordInRow({
+  const targetWordIndex = selectClosestWordInRow({
     words: state.words,
     rowWordIndices: state.rowWordIndices,
-    currentWordIndex: state.wordIndex,
+    currentWordIndex,
     targetRowIndex: targetRow,
   });
 
+  const targetPosition = state.sequenceByWordIndex[targetWordIndex];
+  if (targetPosition === undefined || targetPosition < 0) {
+    return;
+  }
+
+  setMotionToPosition(targetPosition);
+  state.lastFrameTime = performance.now();
   redrawTriangle();
-  resetWordTimer();
 }
 
 async function renderPage(pageNumber) {
@@ -201,7 +516,6 @@ async function renderPage(pageNumber) {
     setWords(rendered.words);
     dom.viewerScroll.scrollTop = 0;
     redrawTriangle();
-    resetWordTimer();
     hideEmptyHint();
     setPageStackVisible(true);
   } catch (error) {
@@ -392,31 +706,13 @@ function bindEvents() {
 }
 
 function tickFrame(now) {
+  const deltaMs = Math.max(0, now - state.lastFrameTime);
+  state.lastFrameTime = now;
+
   if (state.running && state.words.length && !state.pageLoading) {
-    let steps = 0;
-
-    while (now >= state.nextWordDue && steps < MAX_CATCH_UP_STEPS && state.running) {
-      state.nextWordDue += state.msPerWord;
-      steps += 1;
-
-      if (state.wordIndex < state.words.length - 1) {
-        state.wordIndex += 1;
-        redrawTriangle();
-        continue;
-      }
-
-      if (state.pdfDoc && state.pageNumber < state.pdfDoc.numPages) {
-        void changePage(1);
-        break;
-      }
-
-      state.running = false;
-      updatePlaybackButton();
-      updateStatusChip();
-    }
-
-    if (steps === MAX_CATCH_UP_STEPS && now >= state.nextWordDue) {
-      resetWordTimer();
+    const moved = advanceMotion(deltaMs);
+    if (moved) {
+      redrawTriangle();
     }
   }
 
