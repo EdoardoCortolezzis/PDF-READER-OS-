@@ -2,6 +2,10 @@
 
 Simple Python desktop app that opens a PDF, renders pages, and moves a triangle pointer word by word at a configurable reading speed (WPM).
 
+## Demo Video
+[![Watch on YouTube](https://img.youtube.com/vi/jMo4RLw0WNY/hqdefault.jpg)](https://youtu.be/jMo4RLw0WNY)
+
+
 ## Project structure
 
 ```text
