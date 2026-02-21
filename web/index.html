@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>PDF Triangle Reader | Liquid Glass UI</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <section class="glass-card top-panel">
+        <div class="title-row">
+          <div>
+            <h1>PDF Triangle Reader</h1>
+            <p>Liquid-glass redesign</p>
+          </div>
+          <div id="status-chip" class="status-chip">Idle</div>
+        </div>
+
+        <div class="controls-grid">
+          <div class="control-group">
+            <label for="pdf-file">PDF source</label>
+            <div class="inline-controls file-picker">
+              <input id="pdf-file" type="file" accept="application/pdf" />
+              <button id="upload-trigger" class="upload-button" type="button">Upload PDF</button>
+              <span id="file-name" class="file-name">No file selected</span>
+            </div>
+          </div>
+
+          <div class="control-group">
+            <label for="speed-slider">Speed</label>
+            <div class="inline-controls">
+              <input
+                id="speed-slider"
+                type="range"
+                min="60"
+                max="1200"
+                step="10"
+                value="260"
+              />
+              <span id="speed-value" class="value-pill">260 wpm</span>
+            </div>
+          </div>
+
+          <div class="control-group">
+            <label>Playback</label>
+            <div class="inline-controls">
+              <button id="toggle-play" type="button">Pause</button>
+              <button id="prev-page" type="button">Prev page</button>
+              <button id="next-page" type="button">Next page</button>
+            </div>
+          </div>
+
+          <div class="control-group">
+            <label>Appearance</label>
+            <div class="inline-controls appearance-controls">
+              <div class="appearance-item">
+                <span>Background</span>
+                <input id="background-color" type="color" value="#041c2b" />
+              </div>
+              <div class="appearance-item">
+                <span>Theme</span>
+                <input id="theme-color" type="color" value="#77d8f2" />
+              </div>
+              <button id="appearance-reset" type="button">Reset</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="glass-card viewer-panel">
+        <div id="viewer-scroll" class="viewer-scroll">
+          <div id="empty-hint" class="empty-hint">
+            Upload a PDF file to begin. <br>
+            Keyboard controls mirror the desktop app: <br>
+            Space, arrows, Shift+Up/Down, and PageUp/PageDown.
+          </div>
+
+          <div id="page-stack" class="page-stack" aria-live="polite">
+            <canvas id="pdf-canvas"></canvas>
+            <canvas id="overlay-canvas"></canvas>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <script type="module" src="./main.js"></script>
+  </body>
+</html>
