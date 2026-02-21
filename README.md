@@ -133,3 +133,7 @@ python -m pdf_triangle_reader path/to/file.pdf [wpm] [--start-page N] [--zoom Z]
 - `PageUp/PageDown`: previous/next page
 - `Mouse wheel`: scroll page
 - `Esc`: exit
+
+## Leava a star if you liked this and/or found this helpful :)
+
+[![Star History Chart](https://api.star-history.com/svg?repos=EdoardoCortolezzis/PDF-READER-OS-&type=Date)](https://www.star-history.com/#EdoardoCortolezzis/PDF-READER-OS-&Date)
