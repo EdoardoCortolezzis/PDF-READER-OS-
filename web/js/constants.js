@@ -12,4 +12,3 @@ export const APPEARANCE_DEFAULTS = Object.freeze({
 export const APPEARANCE_STORAGE_KEY = "pdf_triangle_reader_appearance_v1";
 export const PAGE_HORIZONTAL_PADDING = 24;
 export const RERENDER_DEBOUNCE_MS = 120;
-export const MAX_CATCH_UP_STEPS = 20;

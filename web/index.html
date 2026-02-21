@@ -14,6 +14,20 @@
             <h1>PDF Triangle Reader</h1>
             <p>Read at a comfortable pace and move through books at the speed that feels right for you</p>
           </div>
+          <div class="title-actions">
+            <button id="toggle-erase-mode" class="erase-toggle" type="button" aria-label="Erase mode">
+              <span class="eraser-icon" aria-hidden="true"></span>
+              Erase mode
+            </button>
+            <button id="toggle-highlight-mode" class="highlight-toggle" type="button">
+              Highlight mode
+            </button>
+            <label class="highlight-color-control" for="highlight-color">
+              <span>Color</span>
+              <input id="highlight-color" type="color" value="#fff176" />
+            </label>
+            <button id="save-annotated" type="button" disabled>Save PDF</button>
+          </div>
           <div id="status-chip" class="status-chip">Idle</div>
         </div>
 

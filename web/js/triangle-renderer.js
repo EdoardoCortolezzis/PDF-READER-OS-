@@ -9,8 +9,13 @@ export function drawTriangle({
   pointer,
   triangleSize,
   themeRgb,
+  highlightRects = [],
+  selectionRects = [],
 }) {
   overlayContext.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+
+  drawHighlightRects(overlayContext, highlightRects, false);
+  drawHighlightRects(overlayContext, selectionRects, true);
 
   if (!words.length || !pointer) {
     return;
@@ -73,6 +78,27 @@ export function drawTriangle({
     y0: pointer.y0,
     y1: pointer.y1,
   });
+}
+
+function drawHighlightRects(context, rects, emphasizeStroke) {
+  if (!rects.length) {
+    return;
+  }
+
+  context.save();
+  rects.forEach((rect) => {
+    const width = Math.max(1, rect.x1 - rect.x0);
+    const height = Math.max(1, rect.y1 - rect.y0);
+    context.fillStyle = rect.fillStyle;
+    context.fillRect(rect.x0, rect.y0, width, height);
+
+    if (emphasizeStroke) {
+      context.strokeStyle = rect.strokeStyle;
+      context.lineWidth = 1;
+      context.strokeRect(rect.x0 + 0.5, rect.y0 + 0.5, Math.max(0, width - 1), Math.max(0, height - 1));
+    }
+  });
+  context.restore();
 }
 
 function ensureWordVisible({ viewerScroll, pageStack, y0, y1 }) {

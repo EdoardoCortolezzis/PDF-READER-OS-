@@ -5,10 +5,36 @@ import {
   RERENDER_DEBOUNCE_MS,
 } from "./js/constants.js";
 import { collectDom } from "./js/dom.js";
-import { loadPdfDocument, renderPdfPage } from "./js/pdf-service.js";
+import {
+  addPdfHighlightAnnotation,
+  loadPdfDocument,
+  removePdfHighlightAnnotationAtPoint,
+  renderPdfPage,
+} from "./js/pdf-service.js";
 import { buildRowIndex, selectClosestWordInRow } from "./js/row-index.js";
 import { drawTriangle } from "./js/triangle-renderer.js";
 import { clamp } from "./js/utils.js";
+import {
+  buildRectsForWordIndices,
+  colorToRgba,
+  flattenAnnotationRects,
+  getWordIndicesForPositionRange,
+  viewPointToPdfPoint,
+  viewRectToPdfQuad,
+} from "./js/annotations/geometry.js";
+import {
+  buildReadingOrder,
+  computeTransitionWeights,
+  computeTriangleSize,
+  lerp,
+  wordCenter,
+} from "./js/reader/motion.js";
+import {
+  interactionModeLabel,
+  INTERACTION_MODES,
+  isNormalInteractionMode,
+  resolveInteractionModeTransition,
+} from "./js/state/interaction-mode.js";
 
 const dom = collectDom();
 const overlayContext = dom.overlayCanvas.getContext("2d");
@@ -23,6 +49,8 @@ const appearance = new AppearanceController({
 
 const state = {
   pdfDoc: null,
+  pdfBytes: null,
+  savingFile: false,
   pageNumber: 1,
   wordIndex: 0,
   words: [],
@@ -33,6 +61,17 @@ const state = {
   transitionWeights: [],
   running: true,
   pageLoading: false,
+  interactionMode: INTERACTION_MODES.NORMAL,
+  highlightColorHex: "#fff176",
+  highlightPersisting: false,
+  overlayHighlightRects: [],
+  activeSelection: {
+    dragging: false,
+    pointerId: null,
+    startPosition: -1,
+    endPosition: -1,
+  },
+  viewportInverseTransform: [1, 0, 0, 1, 0, 0],
   wpm: READER_LIMITS.defaultWpm,
   minWpm: READER_LIMITS.minWpm,
   maxWpm: READER_LIMITS.maxWpm,
@@ -66,118 +105,11 @@ function setPageStackVisible(visible) {
   dom.pageStack.style.display = visible ? "block" : "none";
 }
 
-function lerp(from, to, t) {
-  return from + ((to - from) * t);
-}
-
-function wordCenter(word) {
-  return {
-    x: (word.x0 + word.x1) / 2,
-    y: (word.y0 + word.y1) / 2,
-  };
-}
-
-function buildReadingOrder(words, rowWordIndices) {
-  const order = rowWordIndices.flat();
-  if (order.length === words.length) {
-    return order;
+function getErrorMessage(error) {
+  if (error instanceof Error) {
+    return error.message;
   }
-
-  const seen = new Set(order);
-  for (let index = 0; index < words.length; index += 1) {
-    if (!seen.has(index)) {
-      order.push(index);
-    }
-  }
-
-  return order;
-}
-
-function computeTriangleSize(words) {
-  if (!words.length) {
-    return {
-      width: 26,
-      height: 20,
-    };
-  }
-
-  const heights = words
-    .map((word) => Math.max(1, word.y1 - word.y0))
-    .sort((left, right) => left - right);
-
-  const medianHeight = heights[Math.floor(heights.length / 2)] ?? 20;
-  const triangleHeight = Math.max(18, medianHeight * 0.9);
-
-  return {
-    height: triangleHeight,
-    width: Math.max(24, triangleHeight * 1.35),
-  };
-}
-
-function computeTransitionWeights({
-  words,
-  rowWordIndices,
-  readingOrder,
-  sequenceByWordIndex,
-}) {
-  const weights = new Array(Math.max(0, readingOrder.length - 1)).fill(1);
-  if (!weights.length) {
-    return weights;
-  }
-
-  rowWordIndices.forEach((row) => {
-    if (row.length < 2) {
-      return;
-    }
-
-    const segments = [];
-    let totalDistance = 0;
-
-    for (let index = 0; index < row.length - 1; index += 1) {
-      const leftWordIndex = row[index];
-      const rightWordIndex = row[index + 1];
-
-      const leftPosition = sequenceByWordIndex[leftWordIndex];
-      const rightPosition = sequenceByWordIndex[rightWordIndex];
-      if (leftPosition === undefined || leftPosition < 0) {
-        continue;
-      }
-      if (rightPosition !== leftPosition + 1) {
-        continue;
-      }
-
-      const leftCenter = wordCenter(words[leftWordIndex]);
-      const rightCenter = wordCenter(words[rightWordIndex]);
-      const distance = Math.hypot(
-        rightCenter.x - leftCenter.x,
-        rightCenter.y - leftCenter.y
-      );
-
-      segments.push({
-        position: leftPosition,
-        distance,
-      });
-      totalDistance += distance;
-    }
-
-    if (!segments.length) {
-      return;
-    }
-
-    if (totalDistance <= 0.001) {
-      segments.forEach(({ position }) => {
-        weights[position] = 1;
-      });
-      return;
-    }
-
-    const normalization = segments.length;
-    segments.forEach(({ position, distance }) => {
-      weights[position] = normalization * (distance / totalDistance);
-    });
-  });
-
-  return weights;
+  return String(error ?? "Unknown error");
 }
 
 function getWordIndexAtPosition(position) {
@@ -352,8 +284,12 @@ function updatePlaybackButton() {
 function updateStatusChip() {
   const mode = !state.pdfDoc
     ? "Idle"
+    : state.savingFile
+      ? "Saving file"
     : state.pageLoading
       ? "Loading"
+    : state.highlightPersisting
+      ? "Applying edits"
       : state.running
         ? "Playing"
         : "Paused";
@@ -362,9 +298,36 @@ function updateStatusChip() {
     ? `Page ${state.pageNumber}/${state.pdfDoc.numPages}`
     : "No PDF loaded";
 
-  dom.statusChip.textContent = `${mode}  |  ${pageText}`;
+  const modeText = !state.pdfDoc
+    ? ""
+    : ` | ${interactionModeLabel(state.interactionMode)}`;
+  dom.statusChip.textContent = `${mode}  |  ${pageText}${modeText}`;
   dom.statusChip.classList.toggle("is-playing", mode === "Playing");
   dom.statusChip.classList.toggle("is-paused", mode === "Paused");
+}
+
+function updateHighlightControls() {
+  const busy = state.pageLoading || state.highlightPersisting || state.savingFile;
+  const canInteract = Boolean(state.pdfDoc) && !busy;
+  dom.toggleHighlightModeButton.disabled = !canInteract;
+  dom.toggleEraseModeButton.disabled = !canInteract;
+  dom.highlightColorInput.disabled = !canInteract;
+
+  const canSave = Boolean(state.pdfBytes) && !busy;
+  dom.saveAnnotatedButton.disabled = !canSave;
+  dom.saveAnnotatedButton.textContent = state.savingFile ? "Saving..." : "Save PDF";
+
+  const highlightActive = state.interactionMode === INTERACTION_MODES.HIGHLIGHT;
+  const eraseActive = state.interactionMode === INTERACTION_MODES.ERASE;
+  dom.toggleHighlightModeButton.classList.toggle("is-active", highlightActive);
+  dom.toggleEraseModeButton.classList.toggle("is-active", eraseActive);
+  dom.toggleHighlightModeButton.setAttribute("aria-pressed", String(highlightActive));
+  dom.toggleEraseModeButton.setAttribute("aria-pressed", String(eraseActive));
+  dom.toggleHighlightModeButton.textContent = highlightActive
+    ? "Highlight mode: on"
+    : "Highlight mode";
+  dom.pageStack.classList.toggle("highlight-mode-active", highlightActive);
+  dom.pageStack.classList.toggle("erase-mode-active", eraseActive);
 }
 
 function setSpeed(nextWpm, syncSlider = true) {
@@ -391,6 +354,32 @@ function setSpeed(nextWpm, syncSlider = true) {
   updateStatusChip();
 }
 
+function buildSelectionOverlayRects() {
+  if (!state.activeSelection.dragging) {
+    return [];
+  }
+
+  const { startPosition, endPosition } = state.activeSelection;
+  if (startPosition < 0 || endPosition < 0) {
+    return [];
+  }
+
+  const wordIndices = getWordIndicesForPositionRange({
+    readingOrder: state.readingOrder,
+    startPosition,
+    endPosition,
+  });
+  return buildRectsForWordIndices({
+    wordIndices,
+    words: state.words,
+    wordRowIndex: state.wordRowIndex,
+  }).map((rect) => ({
+    ...rect,
+    fillStyle: colorToRgba(state.highlightColorHex, 0.25),
+    strokeStyle: colorToRgba(state.highlightColorHex, 0.7),
+  }));
+}
+
 function redrawTriangle() {
   drawTriangle({
     overlayContext,
@@ -401,6 +390,8 @@ function redrawTriangle() {
     pointer: getPointerState(),
     triangleSize: state.triangleSize,
     themeRgb: appearance.state.themeRgb,
+    highlightRects: state.overlayHighlightRects,
+    selectionRects: buildSelectionOverlayRects(),
   });
 }
 
@@ -436,6 +427,93 @@ function setWords(words) {
   state.motion.durationMs = 0;
 }
 
+function getCurrentWordIndex() {
+  if (!state.readingOrder.length) {
+    return null;
+  }
+
+  return getWordIndexAtPosition(getLogicalPosition());
+}
+
+function getCurrentRowIndex() {
+  if (!state.words.length || !state.rowWordIndices.length || !state.readingOrder.length) {
+    return null;
+  }
+
+  const currentWordIndex = getCurrentWordIndex();
+  if (currentWordIndex === null) {
+    return null;
+  }
+
+  const currentRow = state.wordRowIndex[currentWordIndex];
+  if (currentRow === undefined || currentRow < 0) {
+    return null;
+  }
+
+  return currentRow;
+}
+
+function getCurrentWordCenterX() {
+  const currentWordIndex = getCurrentWordIndex();
+  if (currentWordIndex === null) {
+    return null;
+  }
+
+  const word = state.words[currentWordIndex];
+  if (!word) {
+    return null;
+  }
+
+  return wordCenter(word).x;
+}
+
+function moveCursorToPosition(position) {
+  if (!state.readingOrder.length) {
+    return false;
+  }
+
+  const targetPosition = clamp(position, 0, state.readingOrder.length - 1);
+  if (targetPosition === getLogicalPosition()) {
+    return false;
+  }
+
+  setMotionToPosition(targetPosition);
+  state.lastFrameTime = performance.now();
+  redrawTriangle();
+  return true;
+}
+
+function moveCursorToWordIndex(wordIndex) {
+  const targetPosition = state.sequenceByWordIndex[wordIndex];
+  if (targetPosition === undefined || targetPosition < 0) {
+    return false;
+  }
+
+  return moveCursorToPosition(targetPosition);
+}
+
+function isAtReadingBoundary(deltaWords) {
+  if (!state.readingOrder.length) {
+    return false;
+  }
+
+  const currentPosition = getLogicalPosition();
+  return deltaWords < 0
+    ? currentPosition <= 0
+    : currentPosition >= state.readingOrder.length - 1;
+}
+
+function isAtRowBoundary(deltaRows) {
+  const currentRow = getCurrentRowIndex();
+  if (currentRow === null) {
+    return false;
+  }
+
+  return deltaRows < 0
+    ? currentRow <= 0
+    : currentRow >= state.rowWordIndices.length - 1;
+}
+
 function togglePlayback() {
   state.running = !state.running;
   state.lastFrameTime = performance.now();
@@ -445,33 +523,26 @@ function togglePlayback() {
 
 function stepWord(delta) {
   if (!state.readingOrder.length) {
-    return;
+    return false;
   }
 
-  const targetPosition = clamp(
-    getLogicalPosition() + delta,
-    0,
-    state.readingOrder.length - 1
-  );
-  setMotionToPosition(targetPosition);
-  state.lastFrameTime = performance.now();
-  redrawTriangle();
+  return moveCursorToPosition(getLogicalPosition() + delta);
 }
 
 function moveRow(deltaRows) {
   if (!state.words.length || !state.rowWordIndices.length || !state.readingOrder.length) {
-    return;
+    return false;
   }
 
-  const currentWordIndex = getWordIndexAtPosition(getLogicalPosition());
-  const currentRow = state.wordRowIndex[currentWordIndex];
-  if (currentRow === undefined || currentRow < 0) {
-    return;
+  const currentWordIndex = getCurrentWordIndex();
+  const currentRow = getCurrentRowIndex();
+  if (currentWordIndex === null || currentRow === null) {
+    return false;
   }
 
   const targetRow = clamp(currentRow + deltaRows, 0, state.rowWordIndices.length - 1);
   if (targetRow === currentRow) {
-    return;
+    return false;
   }
 
   const targetWordIndex = selectClosestWordInRow({
@@ -483,27 +554,459 @@ function moveRow(deltaRows) {
 
   const targetPosition = state.sequenceByWordIndex[targetWordIndex];
   if (targetPosition === undefined || targetPosition < 0) {
+    return false;
+  }
+
+  return moveCursorToPosition(targetPosition);
+}
+
+function resolveCursorPlacementPosition(cursorPlacement) {
+  if (!state.readingOrder.length) {
+    return 0;
+  }
+
+  const edge = cursorPlacement?.edge === "end" ? "end" : "start";
+  const fallbackPosition = edge === "end"
+    ? state.readingOrder.length - 1
+    : 0;
+
+  if (!state.rowWordIndices.length) {
+    return fallbackPosition;
+  }
+
+  const rowIndex = edge === "end"
+    ? state.rowWordIndices.length - 1
+    : 0;
+  const row = state.rowWordIndices[rowIndex] ?? [];
+  if (!row.length) {
+    return fallbackPosition;
+  }
+
+  let targetWordIndex = edge === "end"
+    ? row[row.length - 1]
+    : row[0];
+
+  if (Number.isFinite(cursorPlacement?.preferredX)) {
+    const preferredX = cursorPlacement.preferredX;
+    targetWordIndex = row.reduce((bestIndex, candidateIndex) => {
+      const candidateWord = state.words[candidateIndex];
+      const bestWord = state.words[bestIndex];
+      if (!candidateWord || !bestWord) {
+        return bestIndex;
+      }
+
+      const candidateDistance = Math.abs(wordCenter(candidateWord).x - preferredX);
+      const bestDistance = Math.abs(wordCenter(bestWord).x - preferredX);
+      return candidateDistance < bestDistance ? candidateIndex : bestIndex;
+    }, targetWordIndex);
+  }
+
+  const targetPosition = state.sequenceByWordIndex[targetWordIndex];
+  if (targetPosition === undefined || targetPosition < 0) {
+    return fallbackPosition;
+  }
+
+  return targetPosition;
+}
+
+function applyCursorPlacement(cursorPlacement) {
+  if (!cursorPlacement || !state.readingOrder.length) {
     return;
   }
 
-  setMotionToPosition(targetPosition);
-  state.lastFrameTime = performance.now();
+  setMotionToPosition(resolveCursorPlacementPosition(cursorPlacement));
+}
+
+function resetActiveSelection(releasePointerCapture = true) {
+  const wasDragging = state.activeSelection.dragging;
+  const pointerId = state.activeSelection.pointerId;
+
+  state.activeSelection.dragging = false;
+  state.activeSelection.pointerId = null;
+  state.activeSelection.startPosition = -1;
+  state.activeSelection.endPosition = -1;
+
+  if (
+    releasePointerCapture
+    && wasDragging
+    && pointerId !== null
+    && dom.pdfCanvas.hasPointerCapture(pointerId)
+  ) {
+    dom.pdfCanvas.releasePointerCapture(pointerId);
+  }
+}
+
+function setInteractionMode(mode) {
+  if (state.pageLoading || state.highlightPersisting || state.savingFile) {
+    updateHighlightControls();
+    return;
+  }
+
+  const nextMode = resolveInteractionModeTransition({
+    currentMode: state.interactionMode,
+    requestedMode: mode,
+    hasDocument: Boolean(state.pdfDoc),
+  });
+
+  if (nextMode === state.interactionMode) {
+    updateHighlightControls();
+    return;
+  }
+
+  state.interactionMode = nextMode;
+  if (nextMode !== INTERACTION_MODES.HIGHLIGHT) {
+    resetActiveSelection();
+  }
+
+  updateHighlightControls();
+  updateStatusChip();
   redrawTriangle();
 }
 
-async function renderPage(pageNumber) {
-  if (!state.pdfDoc) {
+function getCanvasPointFromPointerEvent(event) {
+  const bounds = dom.pdfCanvas.getBoundingClientRect();
+  if (bounds.width <= 0 || bounds.height <= 0) {
+    return null;
+  }
+
+  const x = ((event.clientX - bounds.left) * dom.pdfCanvas.width) / bounds.width;
+  const y = ((event.clientY - bounds.top) * dom.pdfCanvas.height) / bounds.height;
+  if (x < 0 || y < 0 || x > dom.pdfCanvas.width || y > dom.pdfCanvas.height) {
+    return null;
+  }
+
+  return { x, y };
+}
+
+function findClosestWordIndexAtPoint(point) {
+  if (!point || !state.words.length) {
+    return null;
+  }
+
+  let bestWordIndex = -1;
+  let bestScore = Number.POSITIVE_INFINITY;
+
+  for (let index = 0; index < state.words.length; index += 1) {
+    const word = state.words[index];
+    const dx = point.x < word.x0 ? word.x0 - point.x : point.x > word.x1 ? point.x - word.x1 : 0;
+    const dy = point.y < word.y0 ? word.y0 - point.y : point.y > word.y1 ? point.y - word.y1 : 0;
+    const score = dx + (dy * 1.2);
+
+    if (score < bestScore) {
+      bestScore = score;
+      bestWordIndex = index;
+    }
+  }
+
+  if (bestWordIndex < 0) {
+    return null;
+  }
+
+  const threshold = Math.max(18, state.triangleSize.height * 1.25);
+  return bestScore <= threshold ? bestWordIndex : null;
+}
+
+function bytesToArrayBuffer(bytes) {
+  return bytes.slice(0).buffer;
+}
+
+async function reloadPdfDocumentAtCurrentPage() {
+  if (!state.pdfBytes) {
     return;
   }
 
+  const arrayBuffer = bytesToArrayBuffer(state.pdfBytes);
+  state.pdfDoc = await loadPdfDocument(arrayBuffer);
+  await renderPage(state.pageNumber);
+}
+
+async function runHighlightMutation(task) {
+  state.highlightPersisting = true;
+  updateHighlightControls();
+  updateStatusChip();
+
+  try {
+    await task();
+  } finally {
+    state.highlightPersisting = false;
+    updateHighlightControls();
+    updateStatusChip();
+  }
+}
+
+async function persistRangeHighlight(rects, colorHex) {
+  if (!state.pdfBytes || !rects.length) {
+    return;
+  }
+
+  await runHighlightMutation(async () => {
+    const quadPoints = rects.map((rect) => {
+      return viewRectToPdfQuad(rect, state.viewportInverseTransform);
+    });
+
+    state.pdfBytes = await addPdfHighlightAnnotation({
+      pdfBytes: state.pdfBytes,
+      pageNumber: state.pageNumber,
+      quadPoints,
+      colorHex,
+    });
+    await reloadPdfDocumentAtCurrentPage();
+  });
+}
+
+async function finalizeSelectionAsHighlight() {
+  if (!state.activeSelection.dragging) {
+    return;
+  }
+
+  const { startPosition, endPosition } = state.activeSelection;
+  resetActiveSelection();
+  redrawTriangle();
+
+  if (startPosition < 0 || endPosition < 0) {
+    return;
+  }
+
+  const wordIndices = getWordIndicesForPositionRange({
+    readingOrder: state.readingOrder,
+    startPosition,
+    endPosition,
+  });
+  const rects = buildRectsForWordIndices({
+    wordIndices,
+    words: state.words,
+    wordRowIndex: state.wordRowIndex,
+  });
+  if (!rects.length) {
+    return;
+  }
+
+  try {
+    await persistRangeHighlight(rects, state.highlightColorHex);
+  } catch (error) {
+    window.alert(`Unable to embed highlight annotation in PDF: ${getErrorMessage(error)}`);
+  }
+}
+
+async function eraseHighlightAtPoint(point) {
+  if (!state.pdfBytes) {
+    return;
+  }
+
+  await runHighlightMutation(async () => {
+    const pdfPoint = viewPointToPdfPoint(point, state.viewportInverseTransform);
+    const removed = await removePdfHighlightAnnotationAtPoint({
+      pdfBytes: state.pdfBytes,
+      pageNumber: state.pageNumber,
+      x: pdfPoint.x,
+      y: pdfPoint.y,
+    });
+
+    if (!removed.pdfBytes) {
+      return;
+    }
+    if (!removed.removed) {
+      return;
+    }
+
+    state.pdfBytes = removed.pdfBytes;
+    await reloadPdfDocumentAtCurrentPage();
+  });
+}
+
+function handleCanvasPointerDown(event) {
+  if (
+    !state.pdfDoc
+    || state.pageLoading
+    || state.highlightPersisting
+    || state.savingFile
+    || event.button !== 0
+  ) {
+    return;
+  }
+
+  const point = getCanvasPointFromPointerEvent(event);
+  if (!point) {
+    return;
+  }
+
+  if (state.interactionMode === INTERACTION_MODES.ERASE) {
+    event.preventDefault();
+    void eraseHighlightAtPoint(point).catch((error) => {
+      window.alert(`Unable to erase highlight annotation: ${getErrorMessage(error)}`);
+    });
+    return;
+  }
+
+  if (!state.words.length) {
+    return;
+  }
+
+  const wordIndex = findClosestWordIndexAtPoint(point);
+  if (wordIndex === null) {
+    return;
+  }
+
+  if (isNormalInteractionMode(state.interactionMode)) {
+    event.preventDefault();
+    moveCursorToWordIndex(wordIndex);
+    return;
+  }
+
+  if (state.interactionMode !== INTERACTION_MODES.HIGHLIGHT) {
+    return;
+  }
+
+  const position = state.sequenceByWordIndex[wordIndex];
+  if (position === undefined || position < 0) {
+    return;
+  }
+
+  event.preventDefault();
+  state.activeSelection.dragging = true;
+  state.activeSelection.pointerId = event.pointerId;
+  state.activeSelection.startPosition = position;
+  state.activeSelection.endPosition = position;
+
+  dom.pdfCanvas.setPointerCapture(event.pointerId);
+  redrawTriangle();
+}
+
+function handleCanvasPointerMove(event) {
+  if (
+    !state.activeSelection.dragging
+    || state.activeSelection.pointerId !== event.pointerId
+  ) {
+    return;
+  }
+
+  const point = getCanvasPointFromPointerEvent(event);
+  if (!point) {
+    return;
+  }
+
+  const wordIndex = findClosestWordIndexAtPoint(point);
+  if (wordIndex === null) {
+    return;
+  }
+
+  const nextPosition = state.sequenceByWordIndex[wordIndex];
+  if (nextPosition === undefined || nextPosition < 0) {
+    return;
+  }
+
+  if (nextPosition === state.activeSelection.endPosition) {
+    return;
+  }
+
+  state.activeSelection.endPosition = nextPosition;
+  redrawTriangle();
+}
+
+function handleCanvasPointerCancel(event) {
+  if (
+    !state.activeSelection.dragging
+    || state.activeSelection.pointerId !== event.pointerId
+  ) {
+    return;
+  }
+
+  resetActiveSelection();
+  redrawTriangle();
+}
+
+function handleCanvasPointerUp(event) {
+  if (
+    !state.activeSelection.dragging
+    || state.activeSelection.pointerId !== event.pointerId
+  ) {
+    return;
+  }
+
+  void finalizeSelectionAsHighlight();
+}
+
+async function savePdfToOriginalFile() {
+  if (!state.pdfBytes || state.savingFile) {
+    return;
+  }
+
+  state.savingFile = true;
+  updateHighlightControls();
+  updateStatusChip();
+
+  try {
+    const sourceName = dom.fileName.textContent?.trim() || "";
+    const baseName = sourceName.toLowerCase().endsWith(".pdf")
+      ? sourceName.slice(0, -4)
+      : "document";
+    const downloadName = `${baseName}-annotated.pdf`;
+
+    const blob = new Blob([state.pdfBytes], { type: "application/pdf" });
+    const downloadUrl = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = downloadUrl;
+    link.download = downloadName;
+    document.body.append(link);
+    link.click();
+    link.remove();
+    window.setTimeout(() => URL.revokeObjectURL(downloadUrl), 1500);
+  } finally {
+    state.savingFile = false;
+    updateHighlightControls();
+    updateStatusChip();
+  }
+}
+
+async function openPdfWithSystemPicker() {
+  if (typeof window.showOpenFilePicker !== "function") {
+    dom.fileInput.click();
+    return;
+  }
+
+  try {
+    const [selectedHandle] = await window.showOpenFilePicker({
+      multiple: false,
+      types: [{
+        description: "PDF documents",
+        accept: { "application/pdf": [".pdf"] },
+      }],
+    });
+    if (!selectedHandle) {
+      return;
+    }
+
+    const file = await selectedHandle.getFile();
+    const arrayBuffer = await file.arrayBuffer();
+    dom.fileName.textContent = file.name;
+    await loadPdfFromArrayBuffer(arrayBuffer);
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      return;
+    }
+    throw error;
+  }
+}
+
+async function renderPage(pageNumber, { cursorPlacement = null } = {}) {
+  if (!state.pdfDoc) {
+    return;
+  }
+  const targetPageNumber = clamp(pageNumber, 1, state.pdfDoc.numPages);
+  if (targetPageNumber !== state.pageNumber) {
+    state.pageNumber = targetPageNumber;
+  }
+
   const renderToken = ++pageRenderToken;
+  resetActiveSelection();
   state.pageLoading = true;
+  updateHighlightControls();
   updateStatusChip();
 
   try {
     const rendered = await renderPdfPage({
       pdfDoc: state.pdfDoc,
-      pageNumber,
+      pageNumber: targetPageNumber,
       viewerWidth: dom.viewerScroll.clientWidth,
       pdfCanvas: dom.pdfCanvas,
       overlayCanvas: dom.overlayCanvas,
@@ -514,27 +1017,34 @@ async function renderPage(pageNumber) {
     }
 
     setWords(rendered.words);
+    applyCursorPlacement(cursorPlacement);
+    state.overlayHighlightRects = flattenAnnotationRects(
+      rendered.existingHighlightAnnotations ?? []
+    );
+    state.viewportInverseTransform = rendered.viewportInverseTransform ?? [1, 0, 0, 1, 0, 0];
     dom.viewerScroll.scrollTop = 0;
     redrawTriangle();
     hideEmptyHint();
     setPageStackVisible(true);
   } catch (error) {
-    setEmptyHint(`Failed to render page ${pageNumber}: ${error.message}`);
+    setEmptyHint(`Failed to render page ${targetPageNumber}: ${getErrorMessage(error)}`);
     setPageStackVisible(false);
     setWords([]);
+    state.overlayHighlightRects = [];
     redrawTriangle();
   } finally {
     if (renderToken === pageRenderToken) {
       state.pageLoading = false;
       updateStatusChip();
       updatePlaybackButton();
+      updateHighlightControls();
     }
   }
 }
 
-async function changePage(delta) {
-  if (!state.pdfDoc || state.pageLoading) {
-    return;
+async function changePage(delta, { cursorPlacement = null } = {}) {
+  if (!state.pdfDoc || state.pageLoading || state.highlightPersisting || state.savingFile) {
+    return false;
   }
 
   const targetPage = clamp(
@@ -544,16 +1054,28 @@ async function changePage(delta) {
   );
 
   if (targetPage === state.pageNumber) {
-    return;
+    return false;
   }
 
   state.pageNumber = targetPage;
-  await renderPage(targetPage);
+  await renderPage(targetPage, { cursorPlacement });
+  return true;
 }
 
 async function loadPdfFromArrayBuffer(arrayBuffer) {
   try {
+    if (!(arrayBuffer instanceof ArrayBuffer) || arrayBuffer.byteLength === 0) {
+      throw new Error("The selected file is empty.");
+    }
+
+    state.pdfBytes = new Uint8Array(arrayBuffer.slice(0));
+    state.savingFile = false;
+    state.overlayHighlightRects = [];
+    state.interactionMode = INTERACTION_MODES.NORMAL;
+    resetActiveSelection();
+
     state.pageLoading = true;
+    updateHighlightControls();
     updateStatusChip();
 
     state.pdfDoc = await loadPdfDocument(arrayBuffer);
@@ -565,15 +1087,21 @@ async function loadPdfFromArrayBuffer(arrayBuffer) {
     await renderPage(state.pageNumber);
   } catch (error) {
     state.pdfDoc = null;
+    state.pdfBytes = null;
     state.pageLoading = false;
+    state.savingFile = false;
     setWords([]);
+    state.overlayHighlightRects = [];
+    state.interactionMode = INTERACTION_MODES.NORMAL;
+    resetActiveSelection();
 
     redrawTriangle();
     setPageStackVisible(false);
-    setEmptyHint(`Unable to load PDF. ${error.message}`);
+    setEmptyHint(`Unable to load PDF. ${getErrorMessage(error)}`);
 
     updateStatusChip();
     updatePlaybackButton();
+    updateHighlightControls();
   }
 }
 
@@ -611,17 +1139,65 @@ function applyAppearance(backgroundHex, themeHex, persist = true) {
   }
 }
 
-function handleVerticalKey(event) {
+async function moveCursorAcrossPageBoundary({ deltaPage, edge, preferredX = null }) {
+  const cursorPlacement = {
+    edge,
+    preferredX: Number.isFinite(preferredX) ? preferredX : null,
+  };
+
+  await changePage(deltaPage, { cursorPlacement });
+}
+
+async function handleVerticalKey(event) {
   if (event.shiftKey) {
     setSpeed(state.wpm + (event.code === "ArrowUp" ? 20 : -20));
     return;
   }
 
-  moveRow(event.code === "ArrowUp" ? -1 : 1);
+  if (!isNormalInteractionMode(state.interactionMode)) {
+    return;
+  }
+
+  const deltaRows = event.code === "ArrowUp" ? -1 : 1;
+  if (moveRow(deltaRows) || !isAtRowBoundary(deltaRows)) {
+    return;
+  }
+
+  const preferredX = getCurrentWordCenterX();
+  await moveCursorAcrossPageBoundary({
+    deltaPage: deltaRows > 0 ? 1 : -1,
+    edge: deltaRows > 0 ? "start" : "end",
+    preferredX,
+  });
+}
+
+async function handleHorizontalKey(deltaWords) {
+  if (!isNormalInteractionMode(state.interactionMode)) {
+    return;
+  }
+
+  if (stepWord(deltaWords) || !isAtReadingBoundary(deltaWords)) {
+    return;
+  }
+
+  await moveCursorAcrossPageBoundary({
+    deltaPage: deltaWords > 0 ? 1 : -1,
+    edge: deltaWords > 0 ? "start" : "end",
+  });
 }
 
 function handleKeydown(event) {
-  if (!state.pdfDoc || state.pageLoading) {
+  if (!state.pdfDoc || state.pageLoading || state.savingFile) {
+    return;
+  }
+
+  if (
+    state.interactionMode === INTERACTION_MODES.HIGHLIGHT
+    && state.activeSelection.dragging
+  ) {
+    if (event.code.startsWith("Arrow")) {
+      event.preventDefault();
+    }
     return;
   }
 
@@ -632,8 +1208,6 @@ function handleKeydown(event) {
 
   const basicHandlers = {
     Space: () => togglePlayback(),
-    ArrowRight: () => stepWord(1),
-    ArrowLeft: () => stepWord(-1),
     PageDown: () => {
       void changePage(1);
     },
@@ -644,7 +1218,13 @@ function handleKeydown(event) {
 
   if (event.code === "ArrowUp" || event.code === "ArrowDown") {
     event.preventDefault();
-    handleVerticalKey(event);
+    void handleVerticalKey(event);
+    return;
+  }
+
+  if (event.code === "ArrowRight" || event.code === "ArrowLeft") {
+    event.preventDefault();
+    void handleHorizontalKey(event.code === "ArrowRight" ? 1 : -1);
     return;
   }
 
@@ -657,52 +1237,107 @@ function handleKeydown(event) {
   handler();
 }
 
+function cleanupOnUnload() {
+  if (rerenderTimer !== null) {
+    clearTimeout(rerenderTimer);
+    rerenderTimer = null;
+  }
+  resetActiveSelection();
+}
+
 function bindEvents() {
-  dom.uploadTrigger.addEventListener("click", () => {
-    dom.fileInput.click();
+  const eventController = new AbortController();
+  const { signal } = eventController;
+  const listen = (target, eventName, handler, options = {}) => {
+    target.addEventListener(eventName, handler, {
+      ...options,
+      signal,
+    });
+  };
+
+  listen(dom.uploadTrigger, "click", () => {
+    void openPdfWithSystemPicker().catch((error) => {
+      window.alert(`Unable to open PDF file: ${getErrorMessage(error)}`);
+    });
   });
 
-  dom.backgroundColorInput.addEventListener("input", (event) => {
+  listen(dom.backgroundColorInput, "input", (event) => {
     applyAppearance(event.target.value, appearance.state.themeHex);
   });
 
-  dom.themeColorInput.addEventListener("input", (event) => {
+  listen(dom.themeColorInput, "input", (event) => {
     applyAppearance(appearance.state.backgroundHex, event.target.value);
   });
 
-  dom.appearanceResetButton.addEventListener("click", () => {
-    applyAppearance(
-      APPEARANCE_DEFAULTS.backgroundHex,
-      APPEARANCE_DEFAULTS.themeHex
-    );
+  listen(dom.appearanceResetButton, "click", () => {
+    appearance.reset();
+    if (state.words.length) {
+      redrawTriangle();
+    }
   });
 
-  dom.speedSlider.addEventListener("input", (event) => {
+  listen(dom.speedSlider, "input", (event) => {
     const nextWpm = Number(event.target.value);
     setSpeed(nextWpm, false);
   });
 
-  dom.togglePlayButton.addEventListener("click", () => {
+  listen(dom.togglePlayButton, "click", () => {
     if (!state.pdfDoc) {
       return;
     }
     togglePlayback();
   });
 
-  dom.prevPageButton.addEventListener("click", () => {
+  listen(dom.toggleHighlightModeButton, "click", () => {
+    setInteractionMode(INTERACTION_MODES.HIGHLIGHT);
+  });
+
+  listen(dom.toggleEraseModeButton, "click", () => {
+    setInteractionMode(INTERACTION_MODES.ERASE);
+  });
+
+  listen(dom.highlightColorInput, "input", (event) => {
+    state.highlightColorHex = event.target.value;
+    if (state.activeSelection.dragging) {
+      redrawTriangle();
+    }
+  });
+
+  listen(dom.saveAnnotatedButton, "click", () => {
+    void savePdfToOriginalFile().catch((error) => {
+      window.alert(`Unable to save PDF file: ${getErrorMessage(error)}`);
+    });
+  });
+
+  listen(dom.prevPageButton, "click", () => {
     void changePage(-1);
   });
 
-  dom.nextPageButton.addEventListener("click", () => {
+  listen(dom.nextPageButton, "click", () => {
     void changePage(1);
   });
 
-  dom.fileInput.addEventListener("change", (event) => {
+  listen(dom.fileInput, "change", (event) => {
     void onFileChanged(event);
   });
 
-  window.addEventListener("keydown", handleKeydown);
-  window.addEventListener("resize", queuePageRerender);
+  listen(dom.pdfCanvas, "pointerdown", handleCanvasPointerDown);
+  listen(dom.pdfCanvas, "pointermove", handleCanvasPointerMove);
+  listen(dom.pdfCanvas, "pointerup", handleCanvasPointerUp);
+  listen(dom.pdfCanvas, "pointercancel", handleCanvasPointerCancel);
+  listen(dom.pdfCanvas, "lostpointercapture", () => {
+    if (state.activeSelection.dragging) {
+      resetActiveSelection(false);
+      redrawTriangle();
+    }
+  });
+
+  listen(window, "keydown", handleKeydown);
+  listen(window, "resize", queuePageRerender);
+  listen(window, "beforeunload", () => {
+    cleanupOnUnload();
+    eventController.abort();
+  }, { once: true });
 }
 
 function tickFrame(now) {
@@ -732,9 +1367,11 @@ function bootstrap() {
   }
 
   setPageStackVisible(false);
+  dom.highlightColorInput.value = state.highlightColorHex;
   setSpeed(state.wpm);
   updatePlaybackButton();
   updateStatusChip();
+  updateHighlightControls();
   bindEvents();
   window.requestAnimationFrame(tickFrame);
 }
