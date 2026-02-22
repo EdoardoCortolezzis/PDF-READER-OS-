@@ -122,17 +122,6 @@ Mode behavior:
 - `Shift+Up/Shift+Down`: increase/decrease speed
 - `PageUp/PageDown`: previous/next page
 
-## Known Limitations
+## Leava a star if you liked this and/or found this helpful :)
 
-- Web mode uses CDN-hosted `pdfjs-dist` and `pdf-lib`; offline usage without cached assets is not supported.
-- Highlight erase removes the first matching highlight under the pointer, not a full overlap set.
-- The desktop and web front ends are separate implementations and can differ slightly in rendering/interaction details.
-
-## Pre-Push Checks
-
-```bash
-python3 -m pytest -q
-python3 -m compileall pdf_triangle_reader
-# JavaScript syntax check used in this repo (no JS linter configured)
-for f in $(rg --files web -g '*.js'); do node --check "$f"; done
-```
+[![Star History Chart](https://api.star-history.com/svg?repos=EdoardoCortolezzis/PDF-READER-OS-&type=Date)](https://www.star-history.com/#EdoardoCortolezzis/PDF-READER-OS-&Date)
