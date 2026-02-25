@@ -1,9 +1,4 @@
-function wordCenter(word) {
-  return {
-    x: (word.x0 + word.x1) / 2,
-    y: (word.y0 + word.y1) / 2,
-  };
-}
+import { wordCenter } from "./reader/motion.js";
 
 export function buildRowIndex(words) {
   const rowWordIndices = [];

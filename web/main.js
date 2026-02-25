@@ -47,12 +47,14 @@ const appearance = new AppearanceController({
   themeInput: dom.themeColorInput,
 });
 
+const DEFAULT_VIEWPORT_INVERSE_TRANSFORM = [1, 0, 0, 1, 0, 0];
+const NO_POSITION = -1;
+
 const state = {
   pdfDoc: null,
   pdfBytes: null,
   savingFile: false,
   pageNumber: 1,
-  wordIndex: 0,
   words: [],
   rowWordIndices: [],
   wordRowIndex: [],
@@ -68,10 +70,10 @@ const state = {
   activeSelection: {
     dragging: false,
     pointerId: null,
-    startPosition: -1,
-    endPosition: -1,
+    startPosition: NO_POSITION,
+    endPosition: NO_POSITION,
   },
-  viewportInverseTransform: [1, 0, 0, 1, 0, 0],
+  viewportInverseTransform: DEFAULT_VIEWPORT_INVERSE_TRANSFORM,
   wpm: READER_LIMITS.defaultWpm,
   minWpm: READER_LIMITS.minWpm,
   maxWpm: READER_LIMITS.maxWpm,
@@ -91,6 +93,51 @@ const state = {
 
 let pageRenderToken = 0;
 let rerenderTimer = null;
+let launcherHeartbeatId = null;
+
+const LAUNCHER_HEARTBEAT_PATH = "/__launcher_heartbeat";
+const LAUNCHER_SHUTDOWN_PATH = "/__launcher_shutdown";
+const LAUNCHER_HEARTBEAT_INTERVAL_MS = 2000;
+
+function isLauncherManagedPage() {
+  if (window.location.protocol !== "http:") {
+    return false;
+  }
+
+  const host = window.location.hostname;
+  return host === "127.0.0.1" || host === "localhost";
+}
+
+function sendLauncherSignal(path, keepalive = false) {
+  if (!isLauncherManagedPage()) {
+    return;
+  }
+
+  void fetch(path, {
+    method: "POST",
+    cache: "no-store",
+    keepalive,
+  }).catch(() => {});
+}
+
+function startLauncherHeartbeat() {
+  if (!isLauncherManagedPage() || launcherHeartbeatId !== null) {
+    return;
+  }
+
+  sendLauncherSignal(LAUNCHER_HEARTBEAT_PATH, true);
+  launcherHeartbeatId = window.setInterval(() => {
+    sendLauncherSignal(LAUNCHER_HEARTBEAT_PATH);
+  }, LAUNCHER_HEARTBEAT_INTERVAL_MS);
+}
+
+function stopLauncherHeartbeat() {
+  if (launcherHeartbeatId !== null) {
+    clearInterval(launcherHeartbeatId);
+    launcherHeartbeatId = null;
+  }
+  sendLauncherSignal(LAUNCHER_SHUTDOWN_PATH, true);
+}
 
 function setEmptyHint(message) {
   dom.emptyHint.textContent = message;
@@ -110,6 +157,68 @@ function getErrorMessage(error) {
     return error.message;
   }
   return String(error ?? "Unknown error");
+}
+
+function alertError(prefix, error) {
+  window.alert(`${prefix}: ${getErrorMessage(error)}`);
+}
+
+function runAsync(task, errorPrefix) {
+  void task().catch((error) => {
+    alertError(errorPrefix, error);
+  });
+}
+
+function syncUi({ playback = false, status = true, highlight = true } = {}) {
+  if (status) {
+    updateStatusChip();
+  }
+  if (playback) {
+    updatePlaybackButton();
+  }
+  if (highlight) {
+    updateHighlightControls();
+  }
+}
+
+function isBusy() {
+  return state.pageLoading || state.highlightPersisting || state.savingFile;
+}
+
+function getPositionForWordIndex(wordIndex) {
+  const position = state.sequenceByWordIndex[wordIndex];
+  return position === undefined || position < 0 ? null : position;
+}
+
+function getRectsForPositionRange(startPosition, endPosition) {
+  const wordIndices = getWordIndicesForPositionRange({
+    readingOrder: state.readingOrder,
+    startPosition,
+    endPosition,
+  });
+  return buildRectsForWordIndices({
+    wordIndices,
+    words: state.words,
+    wordRowIndex: state.wordRowIndex,
+  });
+}
+
+function isSelectionPointerEvent(event) {
+  return (
+    state.activeSelection.dragging
+    && state.activeSelection.pointerId === event.pointerId
+  );
+}
+
+async function runWithUiFlag(flagName, task) {
+  state[flagName] = true;
+  syncUi();
+  try {
+    await task();
+  } finally {
+    state[flagName] = false;
+    syncUi();
+  }
 }
 
 function getWordIndexAtPosition(position) {
@@ -133,10 +242,6 @@ function getLogicalPosition() {
   return progress >= 0.5 ? state.motion.toPosition : state.motion.fromPosition;
 }
 
-function syncWordIndexFromMotion() {
-  state.wordIndex = getWordIndexAtPosition(getLogicalPosition());
-}
-
 function transitionDurationMs(position) {
   const weight = state.transitionWeights[position] ?? 1;
   return Math.max(1, weight * state.msPerWord);
@@ -150,8 +255,6 @@ function setMotionToPosition(position) {
   state.motion.toPosition = clamped;
   state.motion.elapsedMs = 0;
   state.motion.durationMs = 0;
-
-  syncWordIndexFromMotion();
 }
 
 function refreshActiveTransitionForCurrentSpeed() {
@@ -184,7 +287,6 @@ function completeTransition() {
   state.motion.fromPosition = state.motion.toPosition;
   state.motion.elapsedMs = 0;
   state.motion.durationMs = 0;
-  syncWordIndexFromMotion();
 }
 
 function maybeAdvancePageAfterEnd() {
@@ -210,8 +312,7 @@ function advanceMotion(deltaMs) {
       if (!startNextTransition()) {
         if (!maybeAdvancePageAfterEnd()) {
           state.running = false;
-          updatePlaybackButton();
-          updateStatusChip();
+          syncUi({ playback: true, highlight: false });
         }
         break;
       }
@@ -234,8 +335,6 @@ function advanceMotion(deltaMs) {
 
     if (state.motion.elapsedMs >= state.motion.durationMs - 0.001) {
       completeTransition();
-    } else {
-      syncWordIndexFromMotion();
     }
   }
 
@@ -307,7 +406,7 @@ function updateStatusChip() {
 }
 
 function updateHighlightControls() {
-  const busy = state.pageLoading || state.highlightPersisting || state.savingFile;
+  const busy = isBusy();
   const canInteract = Boolean(state.pdfDoc) && !busy;
   dom.toggleHighlightModeButton.disabled = !canInteract;
   dom.toggleEraseModeButton.disabled = !canInteract;
@@ -351,7 +450,7 @@ function setSpeed(nextWpm, syncSlider = true) {
 
   refreshActiveTransitionForCurrentSpeed();
   state.lastFrameTime = performance.now();
-  updateStatusChip();
+  syncUi({ highlight: false });
 }
 
 function buildSelectionOverlayRects() {
@@ -360,20 +459,11 @@ function buildSelectionOverlayRects() {
   }
 
   const { startPosition, endPosition } = state.activeSelection;
-  if (startPosition < 0 || endPosition < 0) {
+  if (startPosition === NO_POSITION || endPosition === NO_POSITION) {
     return [];
   }
 
-  const wordIndices = getWordIndicesForPositionRange({
-    readingOrder: state.readingOrder,
-    startPosition,
-    endPosition,
-  });
-  return buildRectsForWordIndices({
-    wordIndices,
-    words: state.words,
-    wordRowIndex: state.wordRowIndex,
-  }).map((rect) => ({
+  return getRectsForPositionRange(startPosition, endPosition).map((rect) => ({
     ...rect,
     fillStyle: colorToRgba(state.highlightColorHex, 0.25),
     strokeStyle: colorToRgba(state.highlightColorHex, 0.7),
@@ -403,7 +493,7 @@ function setWords(words) {
   state.wordRowIndex = rowIndex.wordRowIndex;
 
   state.readingOrder = buildReadingOrder(words, state.rowWordIndices);
-  state.sequenceByWordIndex = new Array(words.length).fill(-1);
+  state.sequenceByWordIndex = new Array(words.length).fill(NO_POSITION);
   state.readingOrder.forEach((wordIndex, position) => {
     state.sequenceByWordIndex[wordIndex] = position;
   });
@@ -414,43 +504,29 @@ function setWords(words) {
     sequenceByWordIndex: state.sequenceByWordIndex,
   });
   state.triangleSize = computeTriangleSize(words);
+  setMotionToPosition(0);
+}
 
-  if (state.readingOrder.length) {
-    setMotionToPosition(0);
-    return;
-  }
-
-  state.wordIndex = 0;
-  state.motion.fromPosition = 0;
-  state.motion.toPosition = 0;
-  state.motion.elapsedMs = 0;
-  state.motion.durationMs = 0;
+function resetInteractionState() {
+  state.interactionMode = INTERACTION_MODES.NORMAL;
+  state.overlayHighlightRects = [];
+  resetActiveSelection();
 }
 
 function getCurrentWordIndex() {
-  if (!state.readingOrder.length) {
-    return null;
-  }
-
-  return getWordIndexAtPosition(getLogicalPosition());
+  return state.readingOrder.length
+    ? getWordIndexAtPosition(getLogicalPosition())
+    : null;
 }
 
 function getCurrentRowIndex() {
-  if (!state.words.length || !state.rowWordIndices.length || !state.readingOrder.length) {
-    return null;
-  }
-
   const currentWordIndex = getCurrentWordIndex();
   if (currentWordIndex === null) {
     return null;
   }
 
   const currentRow = state.wordRowIndex[currentWordIndex];
-  if (currentRow === undefined || currentRow < 0) {
-    return null;
-  }
-
-  return currentRow;
+  return currentRow === undefined || currentRow < 0 ? null : currentRow;
 }
 
 function getCurrentWordCenterX() {
@@ -460,11 +536,7 @@ function getCurrentWordCenterX() {
   }
 
   const word = state.words[currentWordIndex];
-  if (!word) {
-    return null;
-  }
-
-  return wordCenter(word).x;
+  return word ? wordCenter(word).x : null;
 }
 
 function moveCursorToPosition(position) {
@@ -484,8 +556,8 @@ function moveCursorToPosition(position) {
 }
 
 function moveCursorToWordIndex(wordIndex) {
-  const targetPosition = state.sequenceByWordIndex[wordIndex];
-  if (targetPosition === undefined || targetPosition < 0) {
+  const targetPosition = getPositionForWordIndex(wordIndex);
+  if (targetPosition === null) {
     return false;
   }
 
@@ -517,8 +589,7 @@ function isAtRowBoundary(deltaRows) {
 function togglePlayback() {
   state.running = !state.running;
   state.lastFrameTime = performance.now();
-  updatePlaybackButton();
-  updateStatusChip();
+  syncUi({ playback: true, highlight: false });
 }
 
 function stepWord(delta) {
@@ -552,8 +623,8 @@ function moveRow(deltaRows) {
     targetRowIndex: targetRow,
   });
 
-  const targetPosition = state.sequenceByWordIndex[targetWordIndex];
-  if (targetPosition === undefined || targetPosition < 0) {
+  const targetPosition = getPositionForWordIndex(targetWordIndex);
+  if (targetPosition === null) {
     return false;
   }
 
@@ -601,8 +672,8 @@ function resolveCursorPlacementPosition(cursorPlacement) {
     }, targetWordIndex);
   }
 
-  const targetPosition = state.sequenceByWordIndex[targetWordIndex];
-  if (targetPosition === undefined || targetPosition < 0) {
+  const targetPosition = getPositionForWordIndex(targetWordIndex);
+  if (targetPosition === null) {
     return fallbackPosition;
   }
 
@@ -623,8 +694,8 @@ function resetActiveSelection(releasePointerCapture = true) {
 
   state.activeSelection.dragging = false;
   state.activeSelection.pointerId = null;
-  state.activeSelection.startPosition = -1;
-  state.activeSelection.endPosition = -1;
+  state.activeSelection.startPosition = NO_POSITION;
+  state.activeSelection.endPosition = NO_POSITION;
 
   if (
     releasePointerCapture
@@ -637,8 +708,8 @@ function resetActiveSelection(releasePointerCapture = true) {
 }
 
 function setInteractionMode(mode) {
-  if (state.pageLoading || state.highlightPersisting || state.savingFile) {
-    updateHighlightControls();
+  if (isBusy()) {
+    syncUi({ status: false });
     return;
   }
 
@@ -649,7 +720,7 @@ function setInteractionMode(mode) {
   });
 
   if (nextMode === state.interactionMode) {
-    updateHighlightControls();
+    syncUi({ status: false });
     return;
   }
 
@@ -658,8 +729,7 @@ function setInteractionMode(mode) {
     resetActiveSelection();
   }
 
-  updateHighlightControls();
-  updateStatusChip();
+  syncUi();
   redrawTriangle();
 }
 
@@ -706,32 +776,17 @@ function findClosestWordIndexAtPoint(point) {
   return bestScore <= threshold ? bestWordIndex : null;
 }
 
-function bytesToArrayBuffer(bytes) {
-  return bytes.slice(0).buffer;
-}
-
 async function reloadPdfDocumentAtCurrentPage() {
   if (!state.pdfBytes) {
     return;
   }
 
-  const arrayBuffer = bytesToArrayBuffer(state.pdfBytes);
-  state.pdfDoc = await loadPdfDocument(arrayBuffer);
+  state.pdfDoc = await loadPdfDocument(state.pdfBytes.slice(0).buffer);
   await renderPage(state.pageNumber);
 }
 
 async function runHighlightMutation(task) {
-  state.highlightPersisting = true;
-  updateHighlightControls();
-  updateStatusChip();
-
-  try {
-    await task();
-  } finally {
-    state.highlightPersisting = false;
-    updateHighlightControls();
-    updateStatusChip();
-  }
+  await runWithUiFlag("highlightPersisting", task);
 }
 
 async function persistRangeHighlight(rects, colorHex) {
@@ -763,20 +818,11 @@ async function finalizeSelectionAsHighlight() {
   resetActiveSelection();
   redrawTriangle();
 
-  if (startPosition < 0 || endPosition < 0) {
+  if (startPosition === NO_POSITION || endPosition === NO_POSITION) {
     return;
   }
 
-  const wordIndices = getWordIndicesForPositionRange({
-    readingOrder: state.readingOrder,
-    startPosition,
-    endPosition,
-  });
-  const rects = buildRectsForWordIndices({
-    wordIndices,
-    words: state.words,
-    wordRowIndex: state.wordRowIndex,
-  });
+  const rects = getRectsForPositionRange(startPosition, endPosition);
   if (!rects.length) {
     return;
   }
@@ -784,7 +830,7 @@ async function finalizeSelectionAsHighlight() {
   try {
     await persistRangeHighlight(rects, state.highlightColorHex);
   } catch (error) {
-    window.alert(`Unable to embed highlight annotation in PDF: ${getErrorMessage(error)}`);
+    alertError("Unable to embed highlight annotation in PDF", error);
   }
 }
 
@@ -817,9 +863,7 @@ async function eraseHighlightAtPoint(point) {
 function handleCanvasPointerDown(event) {
   if (
     !state.pdfDoc
-    || state.pageLoading
-    || state.highlightPersisting
-    || state.savingFile
+    || isBusy()
     || event.button !== 0
   ) {
     return;
@@ -832,9 +876,10 @@ function handleCanvasPointerDown(event) {
 
   if (state.interactionMode === INTERACTION_MODES.ERASE) {
     event.preventDefault();
-    void eraseHighlightAtPoint(point).catch((error) => {
-      window.alert(`Unable to erase highlight annotation: ${getErrorMessage(error)}`);
-    });
+    runAsync(
+      () => eraseHighlightAtPoint(point),
+      "Unable to erase highlight annotation"
+    );
     return;
   }
 
@@ -857,8 +902,8 @@ function handleCanvasPointerDown(event) {
     return;
   }
 
-  const position = state.sequenceByWordIndex[wordIndex];
-  if (position === undefined || position < 0) {
+  const position = getPositionForWordIndex(wordIndex);
+  if (position === null) {
     return;
   }
 
@@ -873,10 +918,7 @@ function handleCanvasPointerDown(event) {
 }
 
 function handleCanvasPointerMove(event) {
-  if (
-    !state.activeSelection.dragging
-    || state.activeSelection.pointerId !== event.pointerId
-  ) {
+  if (!isSelectionPointerEvent(event)) {
     return;
   }
 
@@ -890,8 +932,8 @@ function handleCanvasPointerMove(event) {
     return;
   }
 
-  const nextPosition = state.sequenceByWordIndex[wordIndex];
-  if (nextPosition === undefined || nextPosition < 0) {
+  const nextPosition = getPositionForWordIndex(wordIndex);
+  if (nextPosition === null) {
     return;
   }
 
@@ -904,10 +946,7 @@ function handleCanvasPointerMove(event) {
 }
 
 function handleCanvasPointerCancel(event) {
-  if (
-    !state.activeSelection.dragging
-    || state.activeSelection.pointerId !== event.pointerId
-  ) {
+  if (!isSelectionPointerEvent(event)) {
     return;
   }
 
@@ -916,10 +955,7 @@ function handleCanvasPointerCancel(event) {
 }
 
 function handleCanvasPointerUp(event) {
-  if (
-    !state.activeSelection.dragging
-    || state.activeSelection.pointerId !== event.pointerId
-  ) {
+  if (!isSelectionPointerEvent(event)) {
     return;
   }
 
@@ -931,11 +967,7 @@ async function savePdfToOriginalFile() {
     return;
   }
 
-  state.savingFile = true;
-  updateHighlightControls();
-  updateStatusChip();
-
-  try {
+  await runWithUiFlag("savingFile", async () => {
     const sourceName = dom.fileName.textContent?.trim() || "";
     const baseName = sourceName.toLowerCase().endsWith(".pdf")
       ? sourceName.slice(0, -4)
@@ -951,11 +983,7 @@ async function savePdfToOriginalFile() {
     link.click();
     link.remove();
     window.setTimeout(() => URL.revokeObjectURL(downloadUrl), 1500);
-  } finally {
-    state.savingFile = false;
-    updateHighlightControls();
-    updateStatusChip();
-  }
+  });
 }
 
 async function openPdfWithSystemPicker() {
@@ -1000,8 +1028,7 @@ async function renderPage(pageNumber, { cursorPlacement = null } = {}) {
   const renderToken = ++pageRenderToken;
   resetActiveSelection();
   state.pageLoading = true;
-  updateHighlightControls();
-  updateStatusChip();
+  syncUi();
 
   try {
     const rendered = await renderPdfPage({
@@ -1021,7 +1048,8 @@ async function renderPage(pageNumber, { cursorPlacement = null } = {}) {
     state.overlayHighlightRects = flattenAnnotationRects(
       rendered.existingHighlightAnnotations ?? []
     );
-    state.viewportInverseTransform = rendered.viewportInverseTransform ?? [1, 0, 0, 1, 0, 0];
+    state.viewportInverseTransform =
+      rendered.viewportInverseTransform ?? DEFAULT_VIEWPORT_INVERSE_TRANSFORM;
     dom.viewerScroll.scrollTop = 0;
     redrawTriangle();
     hideEmptyHint();
@@ -1035,15 +1063,13 @@ async function renderPage(pageNumber, { cursorPlacement = null } = {}) {
   } finally {
     if (renderToken === pageRenderToken) {
       state.pageLoading = false;
-      updateStatusChip();
-      updatePlaybackButton();
-      updateHighlightControls();
+      syncUi({ playback: true });
     }
   }
 }
 
 async function changePage(delta, { cursorPlacement = null } = {}) {
-  if (!state.pdfDoc || state.pageLoading || state.highlightPersisting || state.savingFile) {
+  if (!state.pdfDoc || isBusy()) {
     return false;
   }
 
@@ -1070,20 +1096,17 @@ async function loadPdfFromArrayBuffer(arrayBuffer) {
 
     state.pdfBytes = new Uint8Array(arrayBuffer.slice(0));
     state.savingFile = false;
-    state.overlayHighlightRects = [];
-    state.interactionMode = INTERACTION_MODES.NORMAL;
-    resetActiveSelection();
+    resetInteractionState();
 
     state.pageLoading = true;
-    updateHighlightControls();
-    updateStatusChip();
+    syncUi();
 
     state.pdfDoc = await loadPdfDocument(arrayBuffer);
     state.pageNumber = 1;
     state.running = true;
     setWords([]);
 
-    updatePlaybackButton();
+    syncUi({ playback: true, status: false, highlight: false });
     await renderPage(state.pageNumber);
   } catch (error) {
     state.pdfDoc = null;
@@ -1091,17 +1114,13 @@ async function loadPdfFromArrayBuffer(arrayBuffer) {
     state.pageLoading = false;
     state.savingFile = false;
     setWords([]);
-    state.overlayHighlightRects = [];
-    state.interactionMode = INTERACTION_MODES.NORMAL;
-    resetActiveSelection();
+    resetInteractionState();
 
     redrawTriangle();
     setPageStackVisible(false);
     setEmptyHint(`Unable to load PDF. ${getErrorMessage(error)}`);
 
-    updateStatusChip();
-    updatePlaybackButton();
-    updateHighlightControls();
+    syncUi({ playback: true });
   }
 }
 
@@ -1206,16 +1225,6 @@ function handleKeydown(event) {
     return;
   }
 
-  const basicHandlers = {
-    Space: () => togglePlayback(),
-    PageDown: () => {
-      void changePage(1);
-    },
-    PageUp: () => {
-      void changePage(-1);
-    },
-  };
-
   if (event.code === "ArrowUp" || event.code === "ArrowDown") {
     event.preventDefault();
     void handleVerticalKey(event);
@@ -1228,13 +1237,24 @@ function handleKeydown(event) {
     return;
   }
 
-  const handler = basicHandlers[event.code];
-  if (!handler) {
+  if (event.code === "Space") {
+    event.preventDefault();
+    togglePlayback();
+    return;
+  }
+
+  if (event.code === "PageDown") {
+    event.preventDefault();
+    void changePage(1);
+    return;
+  }
+
+  if (event.code !== "PageUp") {
     return;
   }
 
   event.preventDefault();
-  handler();
+  void changePage(-1);
 }
 
 function cleanupOnUnload() {
@@ -1242,6 +1262,7 @@ function cleanupOnUnload() {
     clearTimeout(rerenderTimer);
     rerenderTimer = null;
   }
+  stopLauncherHeartbeat();
   resetActiveSelection();
 }
 
@@ -1254,12 +1275,18 @@ function bindEvents() {
       signal,
     });
   };
+  const listenAsync = (target, eventName, task, errorPrefix, options = {}) => {
+    listen(target, eventName, (event) => {
+      runAsync(() => task(event), errorPrefix);
+    }, options);
+  };
 
-  listen(dom.uploadTrigger, "click", () => {
-    void openPdfWithSystemPicker().catch((error) => {
-      window.alert(`Unable to open PDF file: ${getErrorMessage(error)}`);
-    });
-  });
+  listenAsync(
+    dom.uploadTrigger,
+    "click",
+    () => openPdfWithSystemPicker(),
+    "Unable to open PDF file"
+  );
 
   listen(dom.backgroundColorInput, "input", (event) => {
     applyAppearance(event.target.value, appearance.state.themeHex);
@@ -1303,11 +1330,12 @@ function bindEvents() {
     }
   });
 
-  listen(dom.saveAnnotatedButton, "click", () => {
-    void savePdfToOriginalFile().catch((error) => {
-      window.alert(`Unable to save PDF file: ${getErrorMessage(error)}`);
-    });
-  });
+  listenAsync(
+    dom.saveAnnotatedButton,
+    "click",
+    () => savePdfToOriginalFile(),
+    "Unable to save PDF file"
+  );
 
   listen(dom.prevPageButton, "click", () => {
     void changePage(-1);
@@ -1317,9 +1345,7 @@ function bindEvents() {
     void changePage(1);
   });
 
-  listen(dom.fileInput, "change", (event) => {
-    void onFileChanged(event);
-  });
+  listenAsync(dom.fileInput, "change", onFileChanged, "Unable to load PDF file");
 
   listen(dom.pdfCanvas, "pointerdown", handleCanvasPointerDown);
   listen(dom.pdfCanvas, "pointermove", handleCanvasPointerMove);
@@ -1369,9 +1395,8 @@ function bootstrap() {
   setPageStackVisible(false);
   dom.highlightColorInput.value = state.highlightColorHex;
   setSpeed(state.wpm);
-  updatePlaybackButton();
-  updateStatusChip();
-  updateHighlightControls();
+  syncUi({ playback: true });
+  startLauncherHeartbeat();
   bindEvents();
   window.requestAnimationFrame(tickFrame);
 }

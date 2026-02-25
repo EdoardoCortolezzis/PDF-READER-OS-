@@ -1,10 +1,9 @@
 # PDF Triangle Reader
 
-Simple Python desktop app that opens a PDF, renders pages, and moves a triangle pointer word by word at a configurable reading speed (WPM).
+JavaScript-based PDF reader UI (`web/`) with a small Python launcher for local/dev usage and macOS packaging.
 
 ## Demo Video
 [![Watch on YouTube](https://img.youtube.com/vi/5xONcDRI2Ho/hqdefault.jpg)](https://youtu.be/5xONcDRI2Ho)
-
 
 ## Project Structure
 
@@ -13,13 +12,7 @@ Simple Python desktop app that opens a PDF, renders pages, and moves a triangle 
 |-- pdf_triangle_reader/
 |   |-- __init__.py
 |   |-- __main__.py
-|   |-- app.py
-|   |-- document.py
-|   |-- playback.py
-|   `-- text_layout.py
-|-- tests/
-|   |-- test_playback.py
-|   `-- test_text_layout.py
+|   `-- app.py
 |-- web/
 |   |-- js/
 |   |   |-- annotations/
@@ -38,6 +31,10 @@ Simple Python desktop app that opens a PDF, renders pages, and moves a triangle 
 |   |-- index.html
 |   |-- main.js
 |   `-- styles.css
+|-- scripts/
+|   `-- build_macos_onefile.sh
+|-- tests/
+|   `-- test_app_launcher.py
 |-- pdf_reader_triangle.py
 |-- requirements.txt
 |-- requirements-dev.txt
@@ -47,15 +44,13 @@ Simple Python desktop app that opens a PDF, renders pages, and moves a triangle 
 ## Requirements
 
 - Python `3.10+`
-- Tkinter available in your Python build
-- Dependencies from `requirements.txt`
 
 ## Setup
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+pip install -r requirements-dev.txt
 ```
 
 Optional editable install:
@@ -64,25 +59,36 @@ Optional editable install:
 pip install -e .
 ```
 
-## Run Desktop App
+## Run Launcher
+
+Opens the JavaScript UI in your default browser.
+The launcher starts a temporary local server (localhost) for the `web/` folder:
 
 ```bash
-python -m pdf_triangle_reader path/to/file.pdf 260
+python -m pdf_triangle_reader
 ```
 
-Legacy wrapper entrypoint:
+Closing the launched webpage/tab will stop the launcher process automatically.
+
+Equivalent wrapper:
 
 ```bash
-python pdf_reader_triangle.py path/to/file.pdf 260
+python pdf_reader_triangle.py
 ```
 
-CLI options:
+Options:
 
 ```bash
-python -m pdf_triangle_reader path/to/file.pdf [wpm] [--start-page N] [--zoom Z]
+python -m pdf_triangle_reader --print-url --no-open
 ```
 
-## Run Web App
+Advanced options:
+
+```bash
+python -m pdf_triangle_reader --host 127.0.0.1 --port 0 --idle-shutdown-seconds 120 --startup-timeout-seconds 20
+```
+
+## Run Web App via Local Server (optional)
 
 From repository root:
 
@@ -95,6 +101,26 @@ Then open:
 ```text
 http://localhost:8000/web/
 ```
+
+## Build macOS Clickable App (Onedir)
+
+Build with PyInstaller and custom icon from `app_logo.png`:
+
+```bash
+./scripts/build_macos_onefile.sh
+```
+
+Outputs:
+
+```text
+dist/PDF Triangle Reader
+dist/PDF Triangle Reader.app
+```
+
+You can copy either output anywhere on your Mac:
+
+- `dist/PDF Triangle Reader`: unpacked runtime bundle directory.
+- `dist/PDF Triangle Reader.app`: app wrapper you can launch by double-clicking.
 
 ## Interaction Modes (Web)
 

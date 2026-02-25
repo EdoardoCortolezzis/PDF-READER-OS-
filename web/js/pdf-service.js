@@ -9,9 +9,20 @@ import {
 } from "https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/+esm";
 
 import { PAGE_HORIZONTAL_PADDING } from "./constants.js";
+import { clampByte, hexToRgb } from "./utils.js";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc =
   "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/build/pdf.worker.min.mjs";
+
+const DEFAULT_HIGHLIGHT_RGB = Object.freeze({ r: 255, g: 241, b: 118 });
+const PDF_SAVE_OPTIONS = Object.freeze({
+  useObjectStreams: false,
+  addDefaultPage: false,
+  updateFieldAppearances: false,
+});
+const PDF_LOAD_OPTIONS = Object.freeze({
+  updateMetadata: false,
+});
 
 export async function loadPdfDocument(arrayBuffer) {
   const loadingTask = pdfjsLib.getDocument({ data: arrayBuffer });
@@ -52,6 +63,22 @@ export async function renderPdfPage({
     height: pdfCanvas.height,
     viewportInverseTransform: [...pdfjsLib.Util.inverseTransform(viewport.transform)],
   };
+}
+
+async function loadEditablePdfDocument(pdfBytes) {
+  return PDFDocument.load(pdfBytes, PDF_LOAD_OPTIONS);
+}
+
+function getPageOrThrow(pdfDoc, pageNumber) {
+  const page = pdfDoc.getPages()[pageNumber - 1];
+  if (!page) {
+    throw new Error(`Page ${pageNumber} is out of range.`);
+  }
+  return page;
+}
+
+function savePdfDocument(pdfDoc) {
+  return pdfDoc.save(PDF_SAVE_OPTIONS);
 }
 
 async function extractWords(page, viewport) {
@@ -165,15 +192,8 @@ export async function addPdfHighlightAnnotation({
     return pdfBytes;
   }
 
-  const pdfDoc = await PDFDocument.load(pdfBytes, {
-    updateMetadata: false,
-  });
-
-  const pages = pdfDoc.getPages();
-  const page = pages[pageNumber - 1];
-  if (!page) {
-    throw new Error(`Page ${pageNumber} is out of range.`);
-  }
+  const pdfDoc = await loadEditablePdfDocument(pdfBytes);
+  const page = getPageOrThrow(pdfDoc, pageNumber);
 
   const flattenedQuadPoints = quadPoints.flatMap((quad) => quad);
   const rect = computeAnnotationRectFromQuads(quadPoints);
@@ -194,14 +214,10 @@ export async function addPdfHighlightAnnotation({
   });
   const annotationRef = pdfDoc.context.register(annotationDict);
 
-  const annots = getOrCreateAnnotsArray(page, pdfDoc.context);
+  const annots = getAnnotsArray(page, pdfDoc.context, true);
   annots.push(annotationRef);
 
-  return pdfDoc.save({
-    useObjectStreams: false,
-    addDefaultPage: false,
-    updateFieldAppearances: false,
-  });
+  return savePdfDocument(pdfDoc);
 }
 
 export async function removePdfHighlightAnnotationAtPoint({
@@ -215,15 +231,8 @@ export async function removePdfHighlightAnnotationAtPoint({
     return { pdfBytes, removed: false };
   }
 
-  const pdfDoc = await PDFDocument.load(pdfBytes, {
-    updateMetadata: false,
-  });
-
-  const page = pdfDoc.getPages()[pageNumber - 1];
-  if (!page) {
-    throw new Error(`Page ${pageNumber} is out of range.`);
-  }
-
+  const pdfDoc = await loadEditablePdfDocument(pdfBytes);
+  const page = getPageOrThrow(pdfDoc, pageNumber);
   const annots = getAnnotsArray(page, pdfDoc.context);
   if (!annots || annots.size() === 0) {
     return { pdfBytes, removed: false };
@@ -254,16 +263,12 @@ export async function removePdfHighlightAnnotationAtPoint({
     return { pdfBytes, removed: false };
   }
 
-  const nextPdfBytes = await pdfDoc.save({
-    useObjectStreams: false,
-    addDefaultPage: false,
-    updateFieldAppearances: false,
-  });
+  const nextPdfBytes = await savePdfDocument(pdfDoc);
 
   return { pdfBytes: nextPdfBytes, removed: true };
 }
 
-function getOrCreateAnnotsArray(page, context) {
+function getAnnotsArray(page, context, createIfMissing = false) {
   if (typeof page.node.Annots === "function") {
     const annots = page.node.Annots();
     if (annots) {
@@ -280,26 +285,13 @@ function getOrCreateAnnotsArray(page, context) {
     }
   }
 
-  const annots = context.obj([]);
-  page.node.set(annotsKey, annots);
-  return annots;
-}
-
-function getAnnotsArray(page, context) {
-  if (typeof page.node.Annots === "function") {
-    const annots = page.node.Annots();
-    if (annots) {
-      return annots;
-    }
-  }
-
-  const annotsKey = PDFName.of("Annots");
-  const existing = page.node.get(annotsKey);
-  if (!existing) {
+  if (!createIfMissing) {
     return null;
   }
 
-  return context.lookup(existing, PDFArray);
+  const annots = context.obj([]);
+  page.node.set(annotsKey, annots);
+  return annots;
 }
 
 function isPointInsideHighlightAnnotation(annotation, context, x, y, tolerance) {
@@ -411,11 +403,11 @@ function toPdfDate(date) {
 }
 
 function hexToPdfColor(hexColor) {
-  const validHex = /^#[0-9a-f]{6}$/i.test(hexColor) ? hexColor : "#fff176";
+  const validHex = hexToRgb(hexColor) ?? DEFAULT_HIGHLIGHT_RGB;
   return [
-    parseInt(validHex.slice(1, 3), 16) / 255,
-    parseInt(validHex.slice(3, 5), 16) / 255,
-    parseInt(validHex.slice(5, 7), 16) / 255,
+    validHex.r / 255,
+    validHex.g / 255,
+    validHex.b / 255,
   ];
 }
 
@@ -440,57 +432,50 @@ function computeAnnotationRectFromQuads(quadPoints) {
 }
 
 function flattenQuadPoints(quadPoints) {
-  if (!quadPoints) {
-    return [];
-  }
-
-  if (ArrayBuffer.isView(quadPoints)) {
-    return Array.from(quadPoints, Number);
-  }
-
-  if (!Array.isArray(quadPoints)) {
-    return [];
-  }
-
   const flattened = [];
-  const stack = [...quadPoints];
-  while (stack.length) {
-    const value = stack.shift();
-    if (typeof value === "number" && Number.isFinite(value)) {
-      flattened.push(value);
-      continue;
-    }
+  appendQuadPointNumbers(quadPoints, flattened);
+  return flattened;
+}
 
-    if (ArrayBuffer.isView(value)) {
-      flattened.push(...Array.from(value, Number));
-      continue;
-    }
-
-    if (Array.isArray(value)) {
-      stack.unshift(...value);
-      continue;
-    }
-
-    if (value && typeof value === "object" && "x" in value && "y" in value) {
-      flattened.push(Number(value.x), Number(value.y));
-    }
+function appendQuadPointNumbers(value, output) {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    output.push(value);
+    return;
   }
 
-  return flattened.filter((value) => Number.isFinite(value));
+  if (ArrayBuffer.isView(value)) {
+    Array.from(value, Number).forEach((entry) => {
+      if (Number.isFinite(entry)) {
+        output.push(entry);
+      }
+    });
+    return;
+  }
+
+  if (Array.isArray(value)) {
+    value.forEach((entry) => appendQuadPointNumbers(entry, output));
+    return;
+  }
+
+  if (!value || typeof value !== "object" || !("x" in value) || !("y" in value)) {
+    return;
+  }
+
+  const x = Number(value.x);
+  const y = Number(value.y);
+  if (Number.isFinite(x) && Number.isFinite(y)) {
+    output.push(x, y);
+  }
 }
 
 function normalizeHighlightColor(color) {
-  if (!color) {
-    return { r: 255, g: 241, b: 118 };
-  }
-
   const values = (
     Array.isArray(color) || ArrayBuffer.isView(color)
       ? Array.from(color)
       : []
   ).slice(0, 3);
   if (!values.length) {
-    return { r: 255, g: 241, b: 118 };
+    return DEFAULT_HIGHLIGHT_RGB;
   }
 
   const normalized = values.map((value) => {
@@ -502,14 +487,10 @@ function normalizeHighlightColor(color) {
   });
 
   return {
-    r: clampByte(normalized[0] ?? 255),
-    g: clampByte(normalized[1] ?? 241),
-    b: clampByte(normalized[2] ?? 118),
+    r: clampByte(normalized[0] ?? DEFAULT_HIGHLIGHT_RGB.r),
+    g: clampByte(normalized[1] ?? DEFAULT_HIGHLIGHT_RGB.g),
+    b: clampByte(normalized[2] ?? DEFAULT_HIGHLIGHT_RGB.b),
   };
-}
-
-function clampByte(value) {
-  return Math.max(0, Math.min(255, Math.round(value)));
 }
 
 function quadToViewRect(points) {

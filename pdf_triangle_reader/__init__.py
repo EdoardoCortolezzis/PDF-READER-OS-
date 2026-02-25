@@ -1,6 +1,5 @@
 """PDF Triangle Reader package."""
 
-from .app import PDFTriangleReader, main
-from .text_layout import WordBox
+from .app import main
 
-__all__ = ["PDFTriangleReader", "WordBox", "main"]
+__all__ = ["main"]
