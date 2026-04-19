@@ -1,4 +1,4 @@
-# PDF Triangle Reader
+# PDF Reading Pacer
 
 JavaScript-based PDF reader UI (`web/`) with a small Python launcher for local/dev usage and macOS packaging.
 
@@ -9,7 +9,7 @@ JavaScript-based PDF reader UI (`web/`) with a small Python launcher for local/d
 
 ```text
 .
-|-- pdf_triangle_reader/
+|-- pdf_reading_pacer/
 |   |-- __init__.py
 |   |-- __main__.py
 |   `-- app.py
@@ -20,10 +20,13 @@ JavaScript-based PDF reader UI (`web/`) with a small Python launcher for local/d
 |   |   |-- reader/
 |   |   |   `-- motion.js
 |   |   |-- state/
-|   |   |   `-- interaction-mode.js
+|   |   |   |-- interaction-mode.js
+|   |   |   `-- pace-mode.js
 |   |   |-- appearance.js
+|   |   |-- bookmark-renderer.js
 |   |   |-- constants.js
 |   |   |-- dom.js
+|   |   |-- overlay-renderer.js
 |   |   |-- pdf-service.js
 |   |   |-- row-index.js
 |   |   |-- triangle-renderer.js
@@ -35,7 +38,7 @@ JavaScript-based PDF reader UI (`web/`) with a small Python launcher for local/d
 |   `-- build_macos_onefile.sh
 |-- tests/
 |   `-- test_app_launcher.py
-|-- pdf_reader_triangle.py
+|-- pdf_reading_pacer.py
 |-- requirements.txt
 |-- requirements-dev.txt
 `-- pyproject.toml
@@ -65,7 +68,7 @@ Opens the JavaScript UI in your default browser.
 The launcher starts a temporary local server (localhost) for the `web/` folder:
 
 ```bash
-python -m pdf_triangle_reader
+python -m pdf_reading_pacer
 ```
 
 Closing the launched webpage/tab will stop the launcher process automatically.
@@ -73,19 +76,19 @@ Closing the launched webpage/tab will stop the launcher process automatically.
 Equivalent wrapper:
 
 ```bash
-python pdf_reader_triangle.py
+python pdf_reading_pacer.py
 ```
 
 Options:
 
 ```bash
-python -m pdf_triangle_reader --print-url --no-open
+python -m pdf_reading_pacer --print-url --no-open
 ```
 
 Advanced options:
 
 ```bash
-python -m pdf_triangle_reader --host 127.0.0.1 --port 0 --idle-shutdown-seconds 120 --startup-timeout-seconds 20
+python -m pdf_reading_pacer --host 127.0.0.1 --port 0 --idle-shutdown-seconds 120 --startup-timeout-seconds 20
 ```
 
 ## Run Web App via Local Server (optional)
@@ -113,14 +116,14 @@ Build with PyInstaller and custom icon from `app_logo.png`:
 Outputs:
 
 ```text
-dist/PDF Triangle Reader
-dist/PDF Triangle Reader.app
+dist/PDF Reading Pacer
+dist/PDF Reading Pacer.app
 ```
 
 You can copy either output anywhere on your Mac:
 
-- `dist/PDF Triangle Reader`: unpacked runtime bundle directory.
-- `dist/PDF Triangle Reader.app`: app wrapper you can launch by double-clicking.
+- `dist/PDF Reading Pacer`: unpacked runtime bundle directory.
+- `dist/PDF Reading Pacer.app`: app wrapper you can launch by double-clicking.
 
 ## Interaction Modes (Web)
 
@@ -133,6 +136,16 @@ Mode behavior:
 - Only one mode is active at a time.
 - Clicking the currently active mode button returns to `Normal`.
 - Mode switching is blocked while the app is loading/saving/applying annotation edits.
+
+## Pace Markers (Web)
+
+- `Sliding triangle`: existing word-following triangle marker.
+- `Drop-down bookmark`: a horizontal bookmark bar that sits on the current text line and animates to the next line with a left tilt, right tilt, then settle.
+
+Marker behavior:
+
+- Pace marker selection is independent from interaction mode (`Normal` / `Highlight` / `Erase`).
+- The selected pace marker is shown in the status chip while a PDF is loaded.
 
 ## Save Behavior (Web)
 
@@ -147,7 +160,8 @@ Mode behavior:
 - `Up/Down`: move to previous/next text row
 - `Shift+Up/Shift+Down`: increase/decrease speed
 - `PageUp/PageDown`: previous/next page
+- `Go to selected page`: type a page number in the playback panel and press the button (or hit `Enter`)
 
-## Leava a star if you liked this and/or found this helpful :)
+## Leave a star if you liked this and/or found this helpful :)
 
 [![Star History Chart](https://api.star-history.com/svg?repos=EdoardoCortolezzis/PDF-READER-OS-&type=Date)](https://www.star-history.com/#EdoardoCortolezzis/PDF-READER-OS-&Date)

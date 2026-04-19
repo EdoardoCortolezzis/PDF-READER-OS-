@@ -77,3 +77,48 @@ export function selectClosestWordInRow({
     return candidateDistance < bestDistance ? candidateIndex : bestIndex;
   }, candidates[0]);
 }
+
+export function buildRowBounds(words, rowWordIndices) {
+  return rowWordIndices.map((row) => {
+    if (!row.length) {
+      return null;
+    }
+
+    let x0 = Number.POSITIVE_INFINITY;
+    let y0 = Number.POSITIVE_INFINITY;
+    let x1 = Number.NEGATIVE_INFINITY;
+    let y1 = Number.NEGATIVE_INFINITY;
+
+    row.forEach((wordIndex) => {
+      const word = words[wordIndex];
+      if (!word) {
+        return;
+      }
+
+      x0 = Math.min(x0, word.x0);
+      y0 = Math.min(y0, word.y0);
+      x1 = Math.max(x1, word.x1);
+      y1 = Math.max(y1, word.y1);
+    });
+
+    if (
+      !Number.isFinite(x0)
+      || !Number.isFinite(y0)
+      || !Number.isFinite(x1)
+      || !Number.isFinite(y1)
+    ) {
+      return null;
+    }
+
+    const lineHeight = Math.max(1, y1 - y0);
+    const padX = Math.max(8, lineHeight * 0.45);
+    const padY = Math.max(2, lineHeight * 0.1);
+
+    return {
+      x0: Math.max(0, x0 - padX),
+      y0: y0 - padY,
+      x1: x1 + padX,
+      y1: y1 + padY,
+    };
+  });
+}

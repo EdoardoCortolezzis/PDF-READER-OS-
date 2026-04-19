@@ -9,6 +9,6 @@ export const APPEARANCE_DEFAULTS = Object.freeze({
   themeHex: "#77d8f2",
 });
 
-export const APPEARANCE_STORAGE_KEY = "pdf_triangle_reader_appearance_v1";
+export const APPEARANCE_STORAGE_KEY = "pdf_reading_pacer_appearance_v1";
 export const PAGE_HORIZONTAL_PADDING = 24;
 export const RERENDER_DEBOUNCE_MS = 120;

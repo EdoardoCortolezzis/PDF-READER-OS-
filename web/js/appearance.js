@@ -41,7 +41,7 @@ export class AppearanceController {
       }
 
       return { backgroundHex, themeHex };
-    } catch (error) {
+    } catch {
       return null;
     }
   }
@@ -100,7 +100,7 @@ export class AppearanceController {
           themeHex: this.state.themeHex,
         })
       );
-    } catch (error) {
+    } catch {
       // Ignore storage errors (private mode or quota issues).
     }
   }

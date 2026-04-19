@@ -1,4 +1,4 @@
-"""PDF Triangle Reader package."""
+"""PDF Reading Pacer package."""
 
 from .app import main
 

@@ -1,24 +1,13 @@
 import { darkenRgb, lightenRgb } from "./utils.js";
 
-export function drawTriangle({
+export function drawTriangleIndicator({
   overlayContext,
-  overlayCanvas,
-  viewerScroll,
-  pageStack,
-  words,
   pointer,
   triangleSize,
   themeRgb,
-  highlightRects = [],
-  selectionRects = [],
 }) {
-  overlayContext.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
-
-  drawHighlightRects(overlayContext, highlightRects, false);
-  drawHighlightRects(overlayContext, selectionRects, true);
-
-  if (!words.length || !pointer) {
-    return;
+  if (!pointer) {
+    return null;
   }
 
   const centerX = pointer.x;
@@ -72,57 +61,8 @@ export function drawTriangle({
   overlayContext.fill();
   overlayContext.stroke();
 
-  ensureWordVisible({
-    viewerScroll,
-    pageStack,
+  return {
     y0: pointer.y0,
     y1: pointer.y1,
-  });
-}
-
-function drawHighlightRects(context, rects, emphasizeStroke) {
-  if (!rects.length) {
-    return;
-  }
-
-  context.save();
-  rects.forEach((rect) => {
-    const width = Math.max(1, rect.x1 - rect.x0);
-    const height = Math.max(1, rect.y1 - rect.y0);
-    context.fillStyle = rect.fillStyle;
-    context.fillRect(rect.x0, rect.y0, width, height);
-
-    if (emphasizeStroke) {
-      context.strokeStyle = rect.strokeStyle;
-      context.lineWidth = 1;
-      context.strokeRect(rect.x0 + 0.5, rect.y0 + 0.5, Math.max(0, width - 1), Math.max(0, height - 1));
-    }
-  });
-  context.restore();
-}
-
-function ensureWordVisible({ viewerScroll, pageStack, y0, y1 }) {
-  const contentHeight = pageStack.offsetHeight;
-  const viewportHeight = viewerScroll.clientHeight;
-  if (!contentHeight || viewportHeight <= 1 || contentHeight <= viewportHeight) {
-    return;
-  }
-
-  const wordTop = pageStack.offsetTop + y0;
-  const wordBottom = pageStack.offsetTop + y1;
-  const currentTop = viewerScroll.scrollTop;
-  const margin = Math.max(44, viewportHeight * 0.2);
-
-  let targetTop = currentTop;
-  if (wordTop < currentTop + margin) {
-    targetTop = wordTop - margin;
-  } else if (wordBottom > currentTop + viewportHeight - margin) {
-    targetTop = wordBottom - viewportHeight + margin;
-  } else {
-    return;
-  }
-
-  const maxTop = contentHeight - viewportHeight;
-  targetTop = Math.max(0, Math.min(targetTop, maxTop));
-  viewerScroll.scrollTop = targetTop;
+  };
 }

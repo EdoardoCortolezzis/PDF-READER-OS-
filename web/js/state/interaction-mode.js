@@ -4,11 +4,11 @@ export const INTERACTION_MODES = Object.freeze({
   ERASE: "erase",
 });
 
-const VALID_MODES = new Set(Object.values(INTERACTION_MODES));
-
-export function isValidInteractionMode(mode) {
-  return VALID_MODES.has(mode);
-}
+const MODE_LABELS = Object.freeze({
+  [INTERACTION_MODES.NORMAL]: "Normal mode",
+  [INTERACTION_MODES.HIGHLIGHT]: "Highlight mode",
+  [INTERACTION_MODES.ERASE]: "Erase mode",
+});
 
 export function isNormalInteractionMode(mode) {
   return mode === INTERACTION_MODES.NORMAL;
@@ -23,7 +23,7 @@ export function resolveInteractionModeTransition({
     return INTERACTION_MODES.NORMAL;
   }
 
-  const normalizedMode = isValidInteractionMode(requestedMode)
+  const normalizedMode = MODE_LABELS[requestedMode]
     ? requestedMode
     : INTERACTION_MODES.NORMAL;
 
@@ -34,11 +34,5 @@ export function resolveInteractionModeTransition({
 }
 
 export function interactionModeLabel(mode) {
-  if (mode === INTERACTION_MODES.HIGHLIGHT) {
-    return "Highlight mode";
-  }
-  if (mode === INTERACTION_MODES.ERASE) {
-    return "Erase mode";
-  }
-  return "Normal mode";
+  return MODE_LABELS[mode] ?? MODE_LABELS[INTERACTION_MODES.NORMAL];
 }

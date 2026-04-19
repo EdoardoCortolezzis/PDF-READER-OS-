@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from pdf_triangle_reader import app
+from pdf_reading_pacer import app
 
 
 def test_resolve_web_root_points_to_web_folder() -> None:

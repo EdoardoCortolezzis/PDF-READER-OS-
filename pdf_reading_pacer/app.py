@@ -41,11 +41,6 @@ def resolve_web_root() -> Path:
         return bundle_root / "web"
     return Path(__file__).resolve().parent.parent / "web"
 
-
-def index_file_path(web_root: Path) -> Path:
-    return web_root / "index.html"
-
-
 def start_static_server(
     web_root: Path,
     host: str = DEFAULT_HOST,
@@ -132,7 +127,7 @@ def launch_url(url: str) -> bool:
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Launch PDF Triangle Reader JavaScript UI."
+        description="Launch PDF Reading Pacer JavaScript UI."
     )
     parser.add_argument(
         "--no-open",
@@ -180,7 +175,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(argv)
 
     web_root = resolve_web_root()
-    index_path = index_file_path(web_root)
+    index_path = web_root / "index.html"
     if not index_path.is_file():
         print(
             f"Error: missing UI entrypoint at {index_path}",

@@ -1,4 +1,4 @@
-from pdf_triangle_reader.app import main
+from pdf_reading_pacer.app import main
 
 
 if __name__ == "__main__":

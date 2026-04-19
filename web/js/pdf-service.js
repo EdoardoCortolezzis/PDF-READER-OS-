@@ -59,14 +59,8 @@ export async function renderPdfPage({
   return {
     words,
     existingHighlightAnnotations,
-    width: pdfCanvas.width,
-    height: pdfCanvas.height,
     viewportInverseTransform: [...pdfjsLib.Util.inverseTransform(viewport.transform)],
   };
-}
-
-async function loadEditablePdfDocument(pdfBytes) {
-  return PDFDocument.load(pdfBytes, PDF_LOAD_OPTIONS);
 }
 
 function getPageOrThrow(pdfDoc, pageNumber) {
@@ -172,7 +166,6 @@ async function extractHighlightAnnotations(page, viewport) {
       }
 
       return {
-        id: annotation.id ?? `doc-highlight-${Math.random().toString(36).slice(2, 10)}`,
         fillStyle: `rgba(${color.r}, ${color.g}, ${color.b}, 0.34)`,
         strokeStyle: `rgba(${color.r}, ${color.g}, ${color.b}, 0.58)`,
         rects,
@@ -186,13 +179,13 @@ export async function addPdfHighlightAnnotation({
   pageNumber,
   quadPoints,
   colorHex = "#fff176",
-  author = "PDF Triangle Reader",
+  author = "PDF Reading Pacer",
 }) {
   if (!pdfBytes || !quadPoints?.length) {
     return pdfBytes;
   }
 
-  const pdfDoc = await loadEditablePdfDocument(pdfBytes);
+  const pdfDoc = await PDFDocument.load(pdfBytes, PDF_LOAD_OPTIONS);
   const page = getPageOrThrow(pdfDoc, pageNumber);
 
   const flattenedQuadPoints = quadPoints.flatMap((quad) => quad);
@@ -231,7 +224,7 @@ export async function removePdfHighlightAnnotationAtPoint({
     return { pdfBytes, removed: false };
   }
 
-  const pdfDoc = await loadEditablePdfDocument(pdfBytes);
+  const pdfDoc = await PDFDocument.load(pdfBytes, PDF_LOAD_OPTIONS);
   const page = getPageOrThrow(pdfDoc, pageNumber);
   const annots = getAnnotsArray(page, pdfDoc.context);
   if (!annots || annots.size() === 0) {
@@ -432,40 +425,11 @@ function computeAnnotationRectFromQuads(quadPoints) {
 }
 
 function flattenQuadPoints(quadPoints) {
-  const flattened = [];
-  appendQuadPointNumbers(quadPoints, flattened);
-  return flattened;
-}
-
-function appendQuadPointNumbers(value, output) {
-  if (typeof value === "number" && Number.isFinite(value)) {
-    output.push(value);
-    return;
+  if (!Array.isArray(quadPoints) && !ArrayBuffer.isView(quadPoints)) {
+    return [];
   }
 
-  if (ArrayBuffer.isView(value)) {
-    Array.from(value, Number).forEach((entry) => {
-      if (Number.isFinite(entry)) {
-        output.push(entry);
-      }
-    });
-    return;
-  }
-
-  if (Array.isArray(value)) {
-    value.forEach((entry) => appendQuadPointNumbers(entry, output));
-    return;
-  }
-
-  if (!value || typeof value !== "object" || !("x" in value) || !("y" in value)) {
-    return;
-  }
-
-  const x = Number(value.x);
-  const y = Number(value.y);
-  if (Number.isFinite(x) && Number.isFinite(y)) {
-    output.push(x, y);
-  }
+  return Array.from(quadPoints, Number).filter(Number.isFinite);
 }
 
 function normalizeHighlightColor(color) {

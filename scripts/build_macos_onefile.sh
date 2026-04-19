@@ -4,8 +4,8 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
-APP_NAME="PDF Triangle Reader"
-ENTRYPOINT="pdf_triangle_reader/__main__.py"
+APP_NAME="PDF Reading Pacer"
+ENTRYPOINT="pdf_reading_pacer/__main__.py"
 ICON_PNG="$ROOT_DIR/app_logo.png"
 if [[ -x "$ROOT_DIR/.venv/bin/python" ]]; then
   PYTHON_BIN="$ROOT_DIR/.venv/bin/python"

@@ -3,15 +3,15 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "pdf-triangle-reader"
+name = "pdf-reading-pacer"
 version = "0.1.0"
-description = "Launcher for the JavaScript PDF Triangle Reader UI."
+description = "Launcher for the JavaScript PDF Reading Pacer UI."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = []
 
 [project.scripts]
-pdf-triangle-reader = "pdf_triangle_reader.app:main"
+pdf-reading-pacer = "pdf_reading_pacer.app:main"
 
 [tool.setuptools]
-packages = ["pdf_triangle_reader"]
+packages = ["pdf_reading_pacer"]

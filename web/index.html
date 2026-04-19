@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>PDF Triangle Reader | Liquid Glass UI</title>
+    <title>PDF Reading Pacer | Liquid Glass UI</title>
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
@@ -11,7 +11,7 @@
       <section class="glass-card top-panel">
         <div class="title-row">
           <div>
-            <h1>PDF Triangle Reader</h1>
+            <h1>PDF Reading Pacer</h1>
             <p>Read at a comfortable pace and move through books at the speed that feels right for you</p>
           </div>
           <div class="title-actions">
@@ -57,11 +57,36 @@
           </div>
 
           <div class="control-group">
-            <label>Playback</label>
+            <label for="pace-mode">Pace marker</label>
             <div class="inline-controls">
-              <button id="toggle-play" type="button">Pause</button>
-              <button id="prev-page" type="button">Prev page</button>
-              <button id="next-page" type="button">Next page</button>
+              <select id="pace-mode" class="mode-select">
+                <option value="triangle">Sliding triangle</option>
+                <option value="drop-down-bookmark">Drop-down bookmark</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="control-group">
+            <label>Playback</label>
+            <div class="playback-controls">
+              <div class="inline-controls">
+                <button id="toggle-play" type="button">Pause</button>
+                <button id="prev-page" type="button">Prev page</button>
+                <button id="next-page" type="button">Next page</button>
+              </div>
+              <div class="inline-controls page-jump-controls">
+                <input
+                  id="page-number-input"
+                  class="page-number-input"
+                  type="number"
+                  min="1"
+                  step="1"
+                  inputmode="numeric"
+                  placeholder="Page #"
+                  aria-label="Page number"
+                />
+                <button id="go-to-page" type="button">Go to selected page</button>
+              </div>
             </div>
           </div>
 

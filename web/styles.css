@@ -317,6 +317,39 @@ h1 {
   row-gap: 10px;
 }
 
+.playback-controls {
+  display: grid;
+  gap: 8px;
+}
+
+.page-jump-controls {
+  flex-wrap: wrap;
+}
+
+.page-number-input {
+  width: 120px;
+  border: 1px solid var(--button-border);
+  background: rgba(var(--theme-rgb), 0.16);
+  color: var(--ink-main);
+  border-radius: 999px;
+  font-family: "Manrope", sans-serif;
+  font-size: 0.84rem;
+  padding: 7px 12px;
+  outline: none;
+}
+
+.page-number-input::placeholder {
+  color: var(--ink-muted);
+}
+
+.page-number-input:focus-visible {
+  box-shadow: 0 0 0 2px rgba(var(--theme-rgb), 0.28);
+}
+
+.page-jump-controls button {
+  white-space: nowrap;
+}
+
 .appearance-item {
   display: inline-flex;
   align-items: center;
@@ -356,6 +389,22 @@ button:hover {
 
 button:active {
   transform: translateY(1px);
+}
+
+.mode-select {
+  width: 100%;
+  border: 1px solid var(--button-border);
+  background: rgba(var(--theme-rgb), 0.16);
+  color: var(--ink-main);
+  border-radius: 999px;
+  font-family: "Manrope", sans-serif;
+  font-size: 0.84rem;
+  padding: 7px 12px;
+  outline: none;
+}
+
+.mode-select:focus-visible {
+  box-shadow: 0 0 0 2px rgba(var(--theme-rgb), 0.28);
 }
 
 input[type="range"] {

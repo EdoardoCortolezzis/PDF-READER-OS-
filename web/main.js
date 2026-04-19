@@ -11,8 +11,12 @@ import {
   removePdfHighlightAnnotationAtPoint,
   renderPdfPage,
 } from "./js/pdf-service.js";
-import { buildRowIndex, selectClosestWordInRow } from "./js/row-index.js";
-import { drawTriangle } from "./js/triangle-renderer.js";
+import {
+  buildRowBounds,
+  buildRowIndex,
+  selectClosestWordInRow,
+} from "./js/row-index.js";
+import { drawReadingOverlay } from "./js/overlay-renderer.js";
 import { clamp } from "./js/utils.js";
 import {
   buildRectsForWordIndices,
@@ -35,6 +39,11 @@ import {
   isNormalInteractionMode,
   resolveInteractionModeTransition,
 } from "./js/state/interaction-mode.js";
+import {
+  normalizePaceMode,
+  paceModeLabel,
+  PACE_MODES,
+} from "./js/state/pace-mode.js";
 
 const dom = collectDom();
 const overlayContext = dom.overlayCanvas.getContext("2d");
@@ -57,6 +66,7 @@ const state = {
   pageNumber: 1,
   words: [],
   rowWordIndices: [],
+  rowBoundsByRow: [],
   wordRowIndex: [],
   readingOrder: [],
   sequenceByWordIndex: [],
@@ -64,6 +74,7 @@ const state = {
   running: true,
   pageLoading: false,
   interactionMode: INTERACTION_MODES.NORMAL,
+  paceMode: PACE_MODES.TRIANGLE,
   highlightColorHex: "#fff176",
   highlightPersisting: false,
   overlayHighlightRects: [],
@@ -169,16 +180,12 @@ function runAsync(task, errorPrefix) {
   });
 }
 
-function syncUi({ playback = false, status = true, highlight = true } = {}) {
-  if (status) {
-    updateStatusChip();
-  }
-  if (playback) {
-    updatePlaybackButton();
-  }
-  if (highlight) {
-    updateHighlightControls();
-  }
+function syncUi() {
+  updateStatusChip();
+  updatePlaybackButton();
+  updateHighlightControls();
+  updatePaceModeControls();
+  updatePageNavigationControls();
 }
 
 function isBusy() {
@@ -312,7 +319,7 @@ function advanceMotion(deltaMs) {
       if (!startNextTransition()) {
         if (!maybeAdvancePageAfterEnd()) {
           state.running = false;
-          syncUi({ playback: true, highlight: false });
+          syncUi();
         }
         break;
       }
@@ -341,7 +348,7 @@ function advanceMotion(deltaMs) {
   return moved;
 }
 
-function getPointerState() {
+function getIndicatorMotion() {
   if (!state.words.length || !state.readingOrder.length) {
     return null;
   }
@@ -365,19 +372,43 @@ function getPointerState() {
   const toCenter = wordCenter(toWord);
 
   return {
-    x: lerp(fromCenter.x, toCenter.x, progress),
-    y0: lerp(fromWord.y0, toWord.y0, progress),
-    y1: lerp(fromWord.y1, toWord.y1, progress),
+    fromWordIndex,
+    toWordIndex,
+    progress,
+    pointer: {
+      x: lerp(fromCenter.x, toCenter.x, progress),
+      y0: lerp(fromWord.y0, toWord.y0, progress),
+      y1: lerp(fromWord.y1, toWord.y1, progress),
+    },
   };
 }
 
 function updatePlaybackButton() {
-  if (!state.pdfDoc) {
-    dom.togglePlayButton.textContent = "Pause";
+  dom.togglePlayButton.textContent = state.running ? "Pause" : "Resume";
+}
+
+function updatePageNavigationControls() {
+  const hasDocument = Boolean(state.pdfDoc);
+  const busy = isBusy();
+
+  dom.pageNumberInput.disabled = !hasDocument || busy;
+  dom.goToPageButton.disabled = !hasDocument || busy;
+  dom.prevPageButton.disabled = !hasDocument || busy || state.pageNumber <= 1;
+  dom.nextPageButton.disabled = !hasDocument || busy || state.pageNumber >= state.pdfDoc.numPages;
+
+  if (!hasDocument) {
+    dom.pageNumberInput.value = "";
+    dom.pageNumberInput.removeAttribute("max");
+    dom.pageNumberInput.placeholder = "Page #";
     return;
   }
 
-  dom.togglePlayButton.textContent = state.running ? "Pause" : "Resume";
+  dom.pageNumberInput.max = String(state.pdfDoc.numPages);
+  dom.pageNumberInput.placeholder = `1-${state.pdfDoc.numPages}`;
+
+  if (document.activeElement !== dom.pageNumberInput) {
+    dom.pageNumberInput.value = String(state.pageNumber);
+  }
 }
 
 function updateStatusChip() {
@@ -399,7 +430,7 @@ function updateStatusChip() {
 
   const modeText = !state.pdfDoc
     ? ""
-    : ` | ${interactionModeLabel(state.interactionMode)}`;
+    : ` | ${interactionModeLabel(state.interactionMode)} | ${paceModeLabel(state.paceMode)}`;
   dom.statusChip.textContent = `${mode}  |  ${pageText}${modeText}`;
   dom.statusChip.classList.toggle("is-playing", mode === "Playing");
   dom.statusChip.classList.toggle("is-paused", mode === "Paused");
@@ -429,6 +460,11 @@ function updateHighlightControls() {
   dom.pageStack.classList.toggle("erase-mode-active", eraseActive);
 }
 
+function updatePaceModeControls() {
+  dom.paceModeSelect.value = state.paceMode;
+  dom.paceModeSelect.disabled = state.pageLoading;
+}
+
 function setSpeed(nextWpm, syncSlider = true) {
   const clamped = clamp(Number(nextWpm), state.minWpm, state.maxWpm);
   const rounded = Math.round(clamped / 10) * 10;
@@ -450,7 +486,26 @@ function setSpeed(nextWpm, syncSlider = true) {
 
   refreshActiveTransitionForCurrentSpeed();
   state.lastFrameTime = performance.now();
-  syncUi({ highlight: false });
+  syncUi();
+}
+
+function setPaceMode(nextMode, syncSelect = true) {
+  const normalized = normalizePaceMode(nextMode);
+
+  if (normalized === state.paceMode) {
+    if (syncSelect && dom.paceModeSelect.value !== normalized) {
+      dom.paceModeSelect.value = normalized;
+    }
+    return;
+  }
+
+  state.paceMode = normalized;
+  if (syncSelect && dom.paceModeSelect.value !== normalized) {
+    dom.paceModeSelect.value = normalized;
+  }
+
+  redrawOverlay();
+  syncUi();
 }
 
 function buildSelectionOverlayRects() {
@@ -470,14 +525,17 @@ function buildSelectionOverlayRects() {
   }));
 }
 
-function redrawTriangle() {
-  drawTriangle({
+function redrawOverlay() {
+  drawReadingOverlay({
     overlayContext,
     overlayCanvas: dom.overlayCanvas,
     viewerScroll: dom.viewerScroll,
     pageStack: dom.pageStack,
     words: state.words,
-    pointer: getPointerState(),
+    paceMode: state.paceMode,
+    indicatorMotion: getIndicatorMotion(),
+    wordRowIndex: state.wordRowIndex,
+    rowBoundsByRow: state.rowBoundsByRow,
     triangleSize: state.triangleSize,
     themeRgb: appearance.state.themeRgb,
     highlightRects: state.overlayHighlightRects,
@@ -491,6 +549,7 @@ function setWords(words) {
   const rowIndex = buildRowIndex(words);
   state.rowWordIndices = rowIndex.rowWordIndices;
   state.wordRowIndex = rowIndex.wordRowIndex;
+  state.rowBoundsByRow = buildRowBounds(words, state.rowWordIndices);
 
   state.readingOrder = buildReadingOrder(words, state.rowWordIndices);
   state.sequenceByWordIndex = new Array(words.length).fill(NO_POSITION);
@@ -529,16 +588,6 @@ function getCurrentRowIndex() {
   return currentRow === undefined || currentRow < 0 ? null : currentRow;
 }
 
-function getCurrentWordCenterX() {
-  const currentWordIndex = getCurrentWordIndex();
-  if (currentWordIndex === null) {
-    return null;
-  }
-
-  const word = state.words[currentWordIndex];
-  return word ? wordCenter(word).x : null;
-}
-
 function moveCursorToPosition(position) {
   if (!state.readingOrder.length) {
     return false;
@@ -551,7 +600,7 @@ function moveCursorToPosition(position) {
 
   setMotionToPosition(targetPosition);
   state.lastFrameTime = performance.now();
-  redrawTriangle();
+  redrawOverlay();
   return true;
 }
 
@@ -589,7 +638,7 @@ function isAtRowBoundary(deltaRows) {
 function togglePlayback() {
   state.running = !state.running;
   state.lastFrameTime = performance.now();
-  syncUi({ playback: true, highlight: false });
+  syncUi();
 }
 
 function stepWord(delta) {
@@ -709,7 +758,7 @@ function resetActiveSelection(releasePointerCapture = true) {
 
 function setInteractionMode(mode) {
   if (isBusy()) {
-    syncUi({ status: false });
+    syncUi();
     return;
   }
 
@@ -720,7 +769,7 @@ function setInteractionMode(mode) {
   });
 
   if (nextMode === state.interactionMode) {
-    syncUi({ status: false });
+    syncUi();
     return;
   }
 
@@ -730,7 +779,7 @@ function setInteractionMode(mode) {
   }
 
   syncUi();
-  redrawTriangle();
+  redrawOverlay();
 }
 
 function getCanvasPointFromPointerEvent(event) {
@@ -785,19 +834,13 @@ async function reloadPdfDocumentAtCurrentPage() {
   await renderPage(state.pageNumber);
 }
 
-async function runHighlightMutation(task) {
-  await runWithUiFlag("highlightPersisting", task);
-}
-
 async function persistRangeHighlight(rects, colorHex) {
   if (!state.pdfBytes || !rects.length) {
     return;
   }
 
-  await runHighlightMutation(async () => {
-    const quadPoints = rects.map((rect) => {
-      return viewRectToPdfQuad(rect, state.viewportInverseTransform);
-    });
+  await runWithUiFlag("highlightPersisting", async () => {
+    const quadPoints = rects.map((rect) => viewRectToPdfQuad(rect, state.viewportInverseTransform));
 
     state.pdfBytes = await addPdfHighlightAnnotation({
       pdfBytes: state.pdfBytes,
@@ -816,7 +859,7 @@ async function finalizeSelectionAsHighlight() {
 
   const { startPosition, endPosition } = state.activeSelection;
   resetActiveSelection();
-  redrawTriangle();
+  redrawOverlay();
 
   if (startPosition === NO_POSITION || endPosition === NO_POSITION) {
     return;
@@ -839,7 +882,7 @@ async function eraseHighlightAtPoint(point) {
     return;
   }
 
-  await runHighlightMutation(async () => {
+  await runWithUiFlag("highlightPersisting", async () => {
     const pdfPoint = viewPointToPdfPoint(point, state.viewportInverseTransform);
     const removed = await removePdfHighlightAnnotationAtPoint({
       pdfBytes: state.pdfBytes,
@@ -848,10 +891,7 @@ async function eraseHighlightAtPoint(point) {
       y: pdfPoint.y,
     });
 
-    if (!removed.pdfBytes) {
-      return;
-    }
-    if (!removed.removed) {
+    if (!removed.pdfBytes || !removed.removed) {
       return;
     }
 
@@ -914,7 +954,7 @@ function handleCanvasPointerDown(event) {
   state.activeSelection.endPosition = position;
 
   dom.pdfCanvas.setPointerCapture(event.pointerId);
-  redrawTriangle();
+  redrawOverlay();
 }
 
 function handleCanvasPointerMove(event) {
@@ -942,7 +982,7 @@ function handleCanvasPointerMove(event) {
   }
 
   state.activeSelection.endPosition = nextPosition;
-  redrawTriangle();
+  redrawOverlay();
 }
 
 function handleCanvasPointerCancel(event) {
@@ -951,7 +991,7 @@ function handleCanvasPointerCancel(event) {
   }
 
   resetActiveSelection();
-  redrawTriangle();
+  redrawOverlay();
 }
 
 function handleCanvasPointerUp(event) {
@@ -1051,7 +1091,7 @@ async function renderPage(pageNumber, { cursorPlacement = null } = {}) {
     state.viewportInverseTransform =
       rendered.viewportInverseTransform ?? DEFAULT_VIEWPORT_INVERSE_TRANSFORM;
     dom.viewerScroll.scrollTop = 0;
-    redrawTriangle();
+    redrawOverlay();
     hideEmptyHint();
     setPageStackVisible(true);
   } catch (error) {
@@ -1059,25 +1099,21 @@ async function renderPage(pageNumber, { cursorPlacement = null } = {}) {
     setPageStackVisible(false);
     setWords([]);
     state.overlayHighlightRects = [];
-    redrawTriangle();
+    redrawOverlay();
   } finally {
     if (renderToken === pageRenderToken) {
       state.pageLoading = false;
-      syncUi({ playback: true });
+      syncUi();
     }
   }
 }
 
-async function changePage(delta, { cursorPlacement = null } = {}) {
+async function goToPage(pageNumber, { cursorPlacement = null } = {}) {
   if (!state.pdfDoc || isBusy()) {
     return false;
   }
 
-  const targetPage = clamp(
-    state.pageNumber + delta,
-    1,
-    state.pdfDoc.numPages
-  );
+  const targetPage = clamp(pageNumber, 1, state.pdfDoc.numPages);
 
   if (targetPage === state.pageNumber) {
     return false;
@@ -1086,6 +1122,39 @@ async function changePage(delta, { cursorPlacement = null } = {}) {
   state.pageNumber = targetPage;
   await renderPage(targetPage, { cursorPlacement });
   return true;
+}
+
+async function changePage(delta, { cursorPlacement = null } = {}) {
+  if (!state.pdfDoc) {
+    return false;
+  }
+
+  return goToPage(state.pageNumber + delta, { cursorPlacement });
+}
+
+async function goToSelectedPage() {
+  if (!state.pdfDoc || isBusy()) {
+    return false;
+  }
+
+  const rawValue = dom.pageNumberInput.value.trim();
+  if (!rawValue) {
+    dom.pageNumberInput.value = String(state.pageNumber);
+    return false;
+  }
+  const selectedPage = /^\d+$/.test(rawValue)
+    ? Number.parseInt(rawValue, 10)
+    : Number.NaN;
+  if (!Number.isInteger(selectedPage) || selectedPage < 1) {
+    window.alert(`Enter a valid page number between 1 and ${state.pdfDoc.numPages}.`);
+    dom.pageNumberInput.focus();
+    dom.pageNumberInput.select();
+    return false;
+  }
+
+  const changed = await goToPage(selectedPage);
+  dom.pageNumberInput.value = String(state.pageNumber);
+  return changed;
 }
 
 async function loadPdfFromArrayBuffer(arrayBuffer) {
@@ -1106,7 +1175,7 @@ async function loadPdfFromArrayBuffer(arrayBuffer) {
     state.running = true;
     setWords([]);
 
-    syncUi({ playback: true, status: false, highlight: false });
+    syncUi();
     await renderPage(state.pageNumber);
   } catch (error) {
     state.pdfDoc = null;
@@ -1116,11 +1185,11 @@ async function loadPdfFromArrayBuffer(arrayBuffer) {
     setWords([]);
     resetInteractionState();
 
-    redrawTriangle();
+    redrawOverlay();
     setPageStackVisible(false);
     setEmptyHint(`Unable to load PDF. ${getErrorMessage(error)}`);
 
-    syncUi({ playback: true });
+    syncUi();
   }
 }
 
@@ -1154,17 +1223,8 @@ async function onFileChanged(event) {
 function applyAppearance(backgroundHex, themeHex, persist = true) {
   appearance.apply(backgroundHex, themeHex, persist);
   if (state.words.length) {
-    redrawTriangle();
+    redrawOverlay();
   }
-}
-
-async function moveCursorAcrossPageBoundary({ deltaPage, edge, preferredX = null }) {
-  const cursorPlacement = {
-    edge,
-    preferredX: Number.isFinite(preferredX) ? preferredX : null,
-  };
-
-  await changePage(deltaPage, { cursorPlacement });
 }
 
 async function handleVerticalKey(event) {
@@ -1182,11 +1242,14 @@ async function handleVerticalKey(event) {
     return;
   }
 
-  const preferredX = getCurrentWordCenterX();
-  await moveCursorAcrossPageBoundary({
-    deltaPage: deltaRows > 0 ? 1 : -1,
-    edge: deltaRows > 0 ? "start" : "end",
-    preferredX,
+  const currentWordIndex = getCurrentWordIndex();
+  const currentWord = currentWordIndex === null ? null : state.words[currentWordIndex];
+  const preferredX = currentWord ? wordCenter(currentWord).x : null;
+  await changePage(deltaRows > 0 ? 1 : -1, {
+    cursorPlacement: {
+      edge: deltaRows > 0 ? "start" : "end",
+      preferredX: Number.isFinite(preferredX) ? preferredX : null,
+    },
   });
 }
 
@@ -1199,9 +1262,11 @@ async function handleHorizontalKey(deltaWords) {
     return;
   }
 
-  await moveCursorAcrossPageBoundary({
-    deltaPage: deltaWords > 0 ? 1 : -1,
-    edge: deltaWords > 0 ? "start" : "end",
+  await changePage(deltaWords > 0 ? 1 : -1, {
+    cursorPlacement: {
+      edge: deltaWords > 0 ? "start" : "end",
+      preferredX: null,
+    },
   });
 }
 
@@ -1221,40 +1286,41 @@ function handleKeydown(event) {
   }
 
   const activeElement = document.activeElement;
-  if (activeElement instanceof HTMLInputElement && activeElement.type === "range") {
+  if (
+    activeElement instanceof HTMLInputElement
+    || activeElement instanceof HTMLTextAreaElement
+    || activeElement instanceof HTMLSelectElement
+    || activeElement?.isContentEditable
+  ) {
     return;
   }
 
-  if (event.code === "ArrowUp" || event.code === "ArrowDown") {
-    event.preventDefault();
-    void handleVerticalKey(event);
-    return;
+  switch (event.code) {
+    case "ArrowUp":
+    case "ArrowDown":
+      event.preventDefault();
+      void handleVerticalKey(event);
+      break;
+    case "ArrowRight":
+    case "ArrowLeft":
+      event.preventDefault();
+      void handleHorizontalKey(event.code === "ArrowRight" ? 1 : -1);
+      break;
+    case "Space":
+      event.preventDefault();
+      togglePlayback();
+      break;
+    case "PageDown":
+      event.preventDefault();
+      void changePage(1);
+      break;
+    case "PageUp":
+      event.preventDefault();
+      void changePage(-1);
+      break;
+    default:
+      break;
   }
-
-  if (event.code === "ArrowRight" || event.code === "ArrowLeft") {
-    event.preventDefault();
-    void handleHorizontalKey(event.code === "ArrowRight" ? 1 : -1);
-    return;
-  }
-
-  if (event.code === "Space") {
-    event.preventDefault();
-    togglePlayback();
-    return;
-  }
-
-  if (event.code === "PageDown") {
-    event.preventDefault();
-    void changePage(1);
-    return;
-  }
-
-  if (event.code !== "PageUp") {
-    return;
-  }
-
-  event.preventDefault();
-  void changePage(-1);
 }
 
 function cleanupOnUnload() {
@@ -1299,13 +1365,17 @@ function bindEvents() {
   listen(dom.appearanceResetButton, "click", () => {
     appearance.reset();
     if (state.words.length) {
-      redrawTriangle();
+      redrawOverlay();
     }
   });
 
   listen(dom.speedSlider, "input", (event) => {
     const nextWpm = Number(event.target.value);
     setSpeed(nextWpm, false);
+  });
+
+  listen(dom.paceModeSelect, "change", (event) => {
+    setPaceMode(event.target.value, false);
   });
 
   listen(dom.togglePlayButton, "click", () => {
@@ -1326,7 +1396,7 @@ function bindEvents() {
   listen(dom.highlightColorInput, "input", (event) => {
     state.highlightColorHex = event.target.value;
     if (state.activeSelection.dragging) {
-      redrawTriangle();
+      redrawOverlay();
     }
   });
 
@@ -1345,6 +1415,26 @@ function bindEvents() {
     void changePage(1);
   });
 
+  listen(dom.goToPageButton, "click", () => {
+    void goToSelectedPage();
+  });
+
+  listen(dom.pageNumberInput, "keydown", (event) => {
+    if (event.key !== "Enter") {
+      return;
+    }
+
+    event.preventDefault();
+    void goToSelectedPage();
+  });
+
+  listen(dom.pageNumberInput, "blur", () => {
+    if (!state.pdfDoc) {
+      return;
+    }
+    dom.pageNumberInput.value = String(state.pageNumber);
+  });
+
   listenAsync(dom.fileInput, "change", onFileChanged, "Unable to load PDF file");
 
   listen(dom.pdfCanvas, "pointerdown", handleCanvasPointerDown);
@@ -1354,7 +1444,7 @@ function bindEvents() {
   listen(dom.pdfCanvas, "lostpointercapture", () => {
     if (state.activeSelection.dragging) {
       resetActiveSelection(false);
-      redrawTriangle();
+      redrawOverlay();
     }
   });
 
@@ -1373,7 +1463,7 @@ function tickFrame(now) {
   if (state.running && state.words.length && !state.pageLoading) {
     const moved = advanceMotion(deltaMs);
     if (moved) {
-      redrawTriangle();
+      redrawOverlay();
     }
   }
 
@@ -1394,8 +1484,9 @@ function bootstrap() {
 
   setPageStackVisible(false);
   dom.highlightColorInput.value = state.highlightColorHex;
+  dom.paceModeSelect.value = state.paceMode;
   setSpeed(state.wpm);
-  syncUi({ playback: true });
+  syncUi();
   startLauncherHeartbeat();
   bindEvents();
   window.requestAnimationFrame(tickFrame);
