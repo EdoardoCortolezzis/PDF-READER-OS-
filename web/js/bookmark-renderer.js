@@ -3,40 +3,15 @@ import { clamp } from "./utils.js";
 
 const COVERED_LINE_COUNT = 3;
 
-const ROTATION_KEYFRAMES = Object.freeze([
-  { at: 0, degrees: 0 },
-  { at: 0.36, degrees: -7.5 },
-  { at: 0.72, degrees: 6.5 },
-  { at: 1, degrees: 0 },
-]);
-
-function easeInOutCubic(value) {
+function easeInOutSine(value) {
   const t = clamp(value, 0, 1);
-  return t < 0.5
-    ? 4 * t * t * t
-    : 1 - ((-2 * t + 2) ** 3) / 2;
+  return -((Math.cos(Math.PI * t) - 1) / 2);
 }
 
-function sampleKeyframes(progress, keyframes) {
-  if (progress <= keyframes[0].at) {
-    return keyframes[0].degrees;
-  }
-
-  for (let index = 1; index < keyframes.length; index += 1) {
-    const previous = keyframes[index - 1];
-    const current = keyframes[index];
-
-    if (progress > current.at) {
-      continue;
-    }
-
-    const span = current.at - previous.at;
-    const localProgress = span <= 0 ? 0 : (progress - previous.at) / span;
-    const easedLocalProgress = easeInOutCubic(localProgress);
-    return lerp(previous.degrees, current.degrees, easedLocalProgress);
-  }
-
-  return keyframes[keyframes.length - 1].degrees;
+function smoothTransitionProgress(value) {
+  const t = clamp(value, 0, 1);
+  // Keep mostly linear motion (triangle-like) while softening the endpoints.
+  return lerp(t, easeInOutSine(t), 0.4);
 }
 
 function drawRoundedRect(context, x, y, width, height, radius) {
@@ -175,7 +150,7 @@ export function drawDropDownBookmarkIndicator({
 
   const clampedProgress = clamp(progress, 0, 1);
   const transitionProgress = isLineTransition
-    ? easeInOutCubic(clampedProgress)
+    ? smoothTransitionProgress(clampedProgress)
     : 0;
 
   const centerX = lerp(fromGeometry.centerX, toGeometry.centerX, transitionProgress);
@@ -195,29 +170,16 @@ export function drawDropDownBookmarkIndicator({
   const centerY = topY + (barHeight / 2);
   const radius = Math.min(8, barHeight * 0.08);
 
-  const direction = toGeometry.centerY >= fromGeometry.centerY ? 1 : -1;
-  const rawTiltDegrees = isLineTransition
-    ? sampleKeyframes(transitionProgress, ROTATION_KEYFRAMES) * direction
-    : 0;
-  const widthTiltScale = clamp(220 / barWidth, 0.14, 1);
-  const tiltDegrees = rawTiltDegrees * widthTiltScale;
-
-  overlayContext.save();
-  overlayContext.translate(centerX, centerY);
-  overlayContext.rotate((tiltDegrees * Math.PI) / 180);
-
   drawRoundedRect(
     overlayContext,
-    -barWidth / 2,
-    -barHeight / 2,
+    centerX - (barWidth / 2),
+    centerY - (barHeight / 2),
     barWidth,
     barHeight,
     radius
   );
   overlayContext.fillStyle = "rgba(0, 0, 0, 1)";
   overlayContext.fill();
-
-  overlayContext.restore();
 
   return {
     y0: centerY - barHeight / 2,
